@@ -1,0 +1,14 @@
+input:
+  generate:
+    count: 10
+    mapping: root = "nada"
+
+pipeline:
+  processors:
+    - python:
+        script: |
+          import time
+          print(f"the time is now {time.ctime()}")
+
+output:
+  stdout: {}
