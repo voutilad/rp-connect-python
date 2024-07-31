@@ -702,6 +702,8 @@ github.com/jstemmer/go-junit-report v0.9.1/go.mod h1:Brl9GWCQeLvo8nXZwPNNblvFj/X
 github.com/juju/gnuflag v0.0.0-20171113085948-2ce1bb71843d/go.mod h1:2PavIy+JPciBPrBUjwbNvtwB6RQlve+hkpll6QSNmOE=
 github.com/jung-kurt/gofpdf v1.0.0/go.mod h1:7Id9E/uU8ce6rXgefFLlgrJj/GYY22cpxn+r32jIOes=
 github.com/jung-kurt/gofpdf v1.0.3-0.20190309125859-24315acbbda5/go.mod h1:7Id9E/uU8ce6rXgefFLlgrJj/GYY22cpxn+r32jIOes=
+github.com/jupiterrider/ffi v0.1.0-beta.10 h1:ABHL1m9vBF8yQwVIgU03te6hspA1QEUMSl2qwRoxsiY=
+github.com/jupiterrider/ffi v0.1.0-beta.10/go.mod h1:Q0UbYabuV24ysKKb/qcBfwIZ6DGJO+P3h62FnzNnqdA=
 github.com/kisielk/errcheck v1.5.0/go.mod h1:pFxgyoBC7bSaBwPgfKdkLd5X25qrDl4LWUI2bnpBCr8=
 github.com/kisielk/gotool v1.0.0/go.mod h1:XhKaO+MFFWcvkIS/tQcRk01m1F5IRFswLeQ+oQHNcck=
 github.com/klauspost/compress v1.9.7/go.mod h1:RyIbtBH6LamlWaDj8nUwkbUhJ87Yi3uG0guNDohfE1A=
@@ -993,6 +995,12 @@ github.com/voutilad/gogopython v0.0.0-20240730204125-c11944305305 h1:6tRMuKE0vyH
 github.com/voutilad/gogopython v0.0.0-20240730204125-c11944305305/go.mod h1:Mn1OkiovcYgQ4twCCkx8qq++X0qpjb5Iqjwi0dICnYU=
 github.com/voutilad/gogopython v0.0.0-20240731153753-fdb5ed994f69 h1:pxG2UQaC15h/4u3qBm+DF95FPu62RXdFGt+dAgMG5qg=
 github.com/voutilad/gogopython v0.0.0-20240731153753-fdb5ed994f69/go.mod h1:Mn1OkiovcYgQ4twCCkx8qq++X0qpjb5Iqjwi0dICnYU=
+github.com/voutilad/gogopython v0.0.0-20240731192356-06514b86a208 h1:Te7eAS7/URSWe3Ptri8T+RAjMbpvpJbM8A6GZzxos8Y=
+github.com/voutilad/gogopython v0.0.0-20240731192356-06514b86a208/go.mod h1:f50aA2KUGYaG9MjAHzs96hySdknz1yEot1OaCG/5S9E=
+github.com/voutilad/gogopython v0.0.0-20240731193631-7243929f4f28 h1:to4HNjHkvrv3CSus3O4zOyrYEzSs/6esXaBIJV+M47Q=
+github.com/voutilad/gogopython v0.0.0-20240731193631-7243929f4f28/go.mod h1:f50aA2KUGYaG9MjAHzs96hySdknz1yEot1OaCG/5S9E=
+github.com/voutilad/gogopython v0.1.0 h1:L+sEuKqPng3Eu7shOoqne0Id+ZBOfDHept8jN+4Vh48=
+github.com/voutilad/gogopython v0.1.0/go.mod h1:f50aA2KUGYaG9MjAHzs96hySdknz1yEot1OaCG/5S9E=
 github.com/wI2L/jsondiff v0.4.0 h1:iP56F9tK83eiLttg3YdmEENtZnwlYd3ezEpNNnfZVyM=
 github.com/wI2L/jsondiff v0.4.0/go.mod h1:nR/vyy1efuDeAtMwc3AF6nZf/2LD1ID8GTyyJ+K8YB0=
 github.com/xdg-go/pbkdf2 v1.0.0 h1:Su7DPu48wXMwC3bs7MCNG+z4FhcyEuz5dlvchbq0B0c=

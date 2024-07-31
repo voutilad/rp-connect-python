@@ -1,7 +1,7 @@
 input:
   generate:
     count: 3
-    mapping: root = "nada"
+    mapping: root = "i do nothing"
 
 pipeline:
   processors:

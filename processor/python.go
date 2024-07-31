@@ -238,16 +238,17 @@ func initSubInterpreter(logger *service.Logger) (*subInterpreter, error) {
 }
 
 func newPythonProcessor(logger *service.Logger, conf *service.ParsedConfig) (*pythonProcessor, error) {
+	// For now, we just execute a "script" inline in the yaml.
 	script, err := conf.FieldString("script")
 	if err != nil {
 		return nil, err
 	}
 
+	// The "main" go routine takes care of initializing the sub-interpreter.
 	chanMtx.Lock()
 	toMain <- PYTHON_SPAWN
 	r := <-fromMain
 	chanMtx.Unlock()
-
 	if r.err != nil {
 		return nil, err
 	}
@@ -264,26 +265,32 @@ func newPythonProcessor(logger *service.Logger, conf *service.ParsedConfig) (*py
 }
 
 func (p *pythonProcessor) Process(ctx context.Context, m *service.Message) (service.MessageBatch, error) {
-
 	p.logger.Info("processing message")
+
+	// We need to lock our OS thread so Go won't screw us.
 	runtime.LockOSThread()
 
-	// We can't trust we're on the same OS thread as before, so we're forced to do this dance.
+	// We may be on a *new* OS thread since the last time, so play it safe and make new state.
 	ts := py.PyThreadState_New(p.state)
 	py.PyEval_RestoreThread(ts)
 
-	// Make python go now.
+	// Make Python go now.
 	py.PyRun_SimpleString(p.script)
 
-	// Clean up our thread state. No idea how to reuse it safely :(
+	// Clean up our thread state. Impossible to re-use safely with Go.
 	py.PyThreadState_Clear(ts)
 	py.PyThreadState_DeleteCurrent()
 
+	// Ok for Go to do its thing again.
 	runtime.UnlockOSThread()
 
 	return []*service.Message{m}, nil
 }
 
+// Teardown a Sub-Interpreter and delete its state. This will probably trigger a lot of Python
+// cleanup under the hood.
+//
+// This returns void because most of these calls are fatal :x
 func stopSubInterpreter(s subInterpreter, mainState py.PyThreadStatePtr, logger *service.Logger) {
 	logger.Infof("stopping sub-interpreter %d\n", s.id)
 
@@ -299,7 +306,7 @@ func stopSubInterpreter(s subInterpreter, mainState py.PyThreadStatePtr, logger 
 }
 
 func (p *pythonProcessor) Close(ctx context.Context) error {
-
+	// xxx
 	if p.closed {
 		return nil
 	}
