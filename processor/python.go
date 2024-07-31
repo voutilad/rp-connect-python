@@ -44,7 +44,7 @@ type pythonProcessor struct {
 	logger *service.Logger
 	state  py.PyInterpreterStatePtr
 	script string
-	closed bool
+	closed atomic.Bool
 }
 
 func init() {
@@ -100,6 +100,7 @@ func mainPython(home string, paths []string, logger *service.Logger) {
 	subInterpeters := make([]subInterpreter, 0)
 
 	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
 
 	for keepGoing {
 		msg := <-toMain
@@ -153,8 +154,6 @@ func mainPython(home string, paths []string, logger *service.Logger) {
 			fromMain <- reply{}
 		}
 	}
-
-	runtime.UnlockOSThread()
 }
 
 // Initialize the main interpreter. Sub-interpreters are created by Processor instances.
@@ -260,7 +259,6 @@ func newPythonProcessor(logger *service.Logger, conf *service.ParsedConfig) (*py
 		logger: logger,
 		script: script,
 		state:  r.state,
-		closed: false,
 	}, nil
 }
 
@@ -307,10 +305,9 @@ func stopSubInterpreter(s subInterpreter, mainState py.PyThreadStatePtr, logger 
 
 func (p *pythonProcessor) Close(ctx context.Context) error {
 	// xxx
-	if p.closed {
+	if !p.closed.CompareAndSwap(false, true) {
 		return nil
 	}
-	p.closed = true
 
 	if processorCnt.Add(-1) == 0 {
 		p.logger.Info("last one...telling main interpreter to clean up")
