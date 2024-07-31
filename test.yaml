@@ -1,17 +1,13 @@
 input:
   generate:
-    count: 3
+    count: 5
+    interval: 10ms
     mapping: root = "i do nothing"
 
 pipeline:
   processors:
     - python:
-        home: /home/dv/src/gogopython/venv
-        paths:
-          - /usr/lib64/python3.12
-          - /usr/lib64/python3.12/lib-dynload
-          - /src/gogopython/venv/lib64/python3.12/site-packages
-          - /src/gogopython/venv/lib/python3.12/site-packages
+        exe: ./venv/bin/python3
         script: |
           import time
           print(f"the time is now {time.ctime()}")

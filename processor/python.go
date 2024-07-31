@@ -1,8 +1,10 @@
 package processor
 
 import (
+	"bufio"
 	"context"
 	"errors"
+	"os/exec"
 	"runtime"
 	"strings"
 	"sync"
@@ -15,6 +17,7 @@ import (
 
 var processorCnt atomic.Int32
 var started atomic.Bool
+var ready atomic.Bool
 
 type message int
 
@@ -57,30 +60,67 @@ func init() {
 		NewConfigSpec().
 		Summary("Process data with Python").
 		Field(service.NewStringField("script")).
-		Field(service.NewStringField("home").Default("./venv")).
-		Field(service.NewStringListField("paths").Default([]string{}))
+		Field(service.NewStringField("exe").Default("python3"))
 
 	ctor := func(conf *service.ParsedConfig, mgr *service.Resources) (service.Processor, error) {
-		home, err := conf.FieldString("home")
-		if err != nil {
-			return nil, err
-		}
-		paths, err := conf.FieldStringList("paths")
-		if err != nil {
-			return nil, err
-		}
-
+		logger := mgr.Logger()
 		if started.CompareAndSwap(false, true) {
 			go func() {
-				mainPython(home, paths, mgr.Logger())
+				exe, err := conf.FieldString("exe")
+				if err != nil {
+					panic(err)
+				}
+				logger.Infof("finding path details for %s\n", exe)
+				helper := "'import sys; print(sys.prefix); [print(p) for p in sys.path if len(p) > 0]'"
+				cmd := exec.Command(exe, "-c", helper)
+				stdout, err := cmd.StdoutPipe()
+				if err != nil {
+					panic(err)
+				}
+				if err = cmd.Start(); err != nil {
+					panic(err)
+				}
+				scanner := bufio.NewScanner(bufio.NewReader(stdout))
+
+				// First line is our home, subsequent are the path
+				var home string
+				paths := make([]string, 0)
+				first := true
+				for scanner.Scan() {
+					text := scanner.Text()
+					if first {
+						home = text
+						first = false
+					} else {
+						paths = append(paths, text)
+					}
+				}
+				if err = cmd.Wait(); err != nil {
+					panic(err)
+				}
+
+				// We now become the Python charmer.
+				mainPython(home, paths, logger)
 			}()
+
+			// Send our Start message
 			chanMtx.Lock()
 			toMain <- PYTHON_START
 			r := <-fromMain
 			chanMtx.Unlock()
 			if r.err != nil {
-				return nil, err
+				return nil, r.err
 			}
+		}
+
+		// hacky, but use the ping pong to make sure we're ready
+		chanMtx.Lock()
+		toMain <- PYTHON_STATUS
+		r := <-fromMain
+		chanMtx.Unlock()
+		if r.err != nil {
+			// this should not happen!
+			panic(r.err)
 		}
 
 		return newPythonProcessor(mgr.Logger(), conf)
@@ -93,11 +133,13 @@ func init() {
 }
 
 func mainPython(home string, paths []string, logger *service.Logger) {
-	started := false
+	pythonStarted := false
 	keepGoing := true
 
 	mainThreadState := py.NullThreadState
-	subInterpeters := make([]subInterpreter, 0)
+	subInterpreters := make([]subInterpreter, 0)
+
+	logger.Infof("starting main python interpreter with home='%s'\n", home)
 
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
@@ -106,7 +148,7 @@ func mainPython(home string, paths []string, logger *service.Logger) {
 		msg := <-toMain
 		switch msg {
 		case PYTHON_START:
-			if !started {
+			if !pythonStarted {
 				logger.Info("starting python interpreter")
 				var err error
 				mainThreadState, err = initPythonOnce(home, paths)
@@ -114,7 +156,7 @@ func mainPython(home string, paths []string, logger *service.Logger) {
 					keepGoing = false
 					logger.Errorf("failed to start python interpreter: %s", err)
 				}
-				started = true
+				pythonStarted = true
 				fromMain <- reply{err: err}
 			} else {
 				logger.Warn("interpreter already started")
@@ -122,9 +164,9 @@ func mainPython(home string, paths []string, logger *service.Logger) {
 			}
 
 		case PYTHON_STOP:
-			if started {
+			if pythonStarted {
 				keepGoing = false
-				for _, s := range subInterpeters {
+				for _, s := range subInterpreters {
 					stopSubInterpreter(s, mainThreadState, logger)
 				}
 				if py.Py_FinalizeEx() != 0 {
@@ -146,7 +188,7 @@ func mainPython(home string, paths []string, logger *service.Logger) {
 				logger.Warn("failed to create subinterpreter")
 				fromMain <- reply{err: err}
 			}
-			subInterpeters = append(subInterpeters, *subInterpreter)
+			subInterpreters = append(subInterpreters, *subInterpreter)
 			fromMain <- reply{state: subInterpreter.state}
 
 		case PYTHON_STATUS:
