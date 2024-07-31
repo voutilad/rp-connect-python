@@ -1,14 +1,20 @@
 input:
   generate:
-    count: 10
+    count: 3
     mapping: root = "nada"
 
 pipeline:
   processors:
     - python:
+        home: /Users/dv/src/gogopython/venv
+        paths:
+          - "/opt/homebrew/Cellar/python@3.12/3.12.4/Frameworks/Python.framework/Versions/3.12/lib/python3.12"
+          - "/opt/homebrew/Cellar/python@3.12/3.12.4/Frameworks/Python.framework/Versions/3.12/lib/python3.12/lib-dynload"
+          - "/Users/dv/src/gogopython/venv/lib/python3.12/site-packages"
         script: |
-          import time
-          print(f"the time is now {time.ctime()}")
+          import pandas as pd
+          s = pd.Series(range(1, 10))
+          print(s.apply(lambda x: x * x))
 
 output:
   stdout: {}

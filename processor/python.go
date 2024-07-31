@@ -3,28 +3,85 @@ package processor
 import (
 	"context"
 	"errors"
+	"runtime"
 	"strings"
+	"sync"
+	"sync/atomic"
 
 	"github.com/redpanda-data/benthos/v4/public/service"
 
 	py "github.com/voutilad/gogopython"
 )
 
+var processorCnt atomic.Int32
+var started atomic.Bool
+
+type message int
+
+const (
+	PYTHON_START  message = iota
+	PYTHON_STATUS         // ping pong!
+	PYTHON_STOP           // stop the world
+	PYTHON_SPAWN          // spawn a subinterpreter
+)
+
+type reply struct {
+	err   error
+	state py.PyInterpreterStatePtr
+}
+
+var fromMain chan reply
+var toMain chan message
+var chanMtx sync.Mutex
+
+type subInterpreter struct {
+	originalTs py.PyThreadStatePtr
+	state      py.PyInterpreterStatePtr
+}
+
 type pythonProcessor struct {
-	logger    *service.Logger
-	config    py.PyConfig_3_12
-	mainState py.PyThreadStatePtr
-	subState  py.PyThreadStatePtr
-	script    string
+	logger *service.Logger
+	state  py.PyInterpreterStatePtr
+	script string
+	closed bool
 }
 
 func init() {
+	processorCnt.Store(0)
+
+	toMain = make(chan message)
+	fromMain = make(chan reply)
+
 	configSpec := service.
 		NewConfigSpec().
 		Summary("Process data with Python").
-		Field(service.NewStringField("script"))
+		Field(service.NewStringField("script")).
+		Field(service.NewStringField("home").Default("./venv")).
+		Field(service.NewStringListField("paths").Default([]string{}))
 
 	ctor := func(conf *service.ParsedConfig, mgr *service.Resources) (service.Processor, error) {
+		home, err := conf.FieldString("home")
+		if err != nil {
+			return nil, err
+		}
+		paths, err := conf.FieldStringList("paths")
+		if err != nil {
+			return nil, err
+		}
+
+		if started.CompareAndSwap(false, true) {
+			go func() {
+				mainPython(home, paths, mgr.Logger())
+			}()
+			chanMtx.Lock()
+			toMain <- PYTHON_START
+			r := <-fromMain
+			chanMtx.Unlock()
+			if r.err != nil {
+				return nil, err
+			}
+		}
+
 		return newPythonProcessor(mgr.Logger(), conf)
 	}
 
@@ -34,23 +91,78 @@ func init() {
 	}
 }
 
-func newPythonProcessor(logger *service.Logger, conf *service.ParsedConfig) (*pythonProcessor, error) {
-	script, err := conf.FieldString("script")
-	if err != nil {
-		return nil, err
+func mainPython(home string, paths []string, logger *service.Logger) {
+	started := false
+	keepGoing := true
+
+	//mainThreadState := py.NullThreadState
+	subInterpeters := make([]subInterpreter, 0)
+
+	runtime.LockOSThread()
+
+	for keepGoing {
+		msg := <-toMain
+		switch msg {
+		case PYTHON_START:
+			if !started {
+				logger.Info("starting python interpreter")
+				_, err := initPythonOnce(home, paths)
+				if err != nil {
+					keepGoing = false
+					logger.Errorf("failed to start python interpreter: %s", err)
+				}
+				fromMain <- reply{err: err}
+			} else {
+				logger.Warn("interpreter already started")
+				fromMain <- reply{err: errors.New("interpreter already started")}
+			}
+
+		case PYTHON_STOP:
+			if started {
+				keepGoing = false
+				logger.Info("stopping")
+				logger.Info("XXX finish me")
+				logger.Infof("xxx close %d interpreters", len(subInterpeters))
+			} else {
+				logger.Warn("interpreter not running")
+				fromMain <- reply{err: errors.New("interpreter not running")}
+			}
+
+		case PYTHON_SPAWN:
+			logger.Info("spawning a sub-interpreter")
+			subInterpreter, err := initSubInterpreter(logger)
+			if err != nil {
+				keepGoing = false
+				logger.Warn("failed to create subinterpreter")
+				fromMain <- reply{err: err}
+			}
+			subInterpeters = append(subInterpeters, *subInterpreter)
+			fromMain <- reply{state: subInterpreter.state}
+
+		case PYTHON_STATUS:
+			logger.Info("i'm alive!")
+			fromMain <- reply{}
+		}
 	}
 
-	py.Load_library()
+	runtime.UnlockOSThread()
+}
+
+// Initialize the main interpreter. Sub-interpreters are created by Processor instances.
+func initPythonOnce(home string, paths []string) (py.PyThreadStatePtr, error) {
+	// Find and load the Python dynamic library.
+	err := py.Load_library()
+	if err != nil {
+		return py.NullThreadState, err
+	}
 
 	// Pre-configure the Python Interpreter
 	preConfig := py.PyPreConfig{}
 	py.PyPreConfig_InitIsolatedConfig(&preConfig)
-	//preConfig.Allocator = 3
 	status := py.Py_PreInitialize(&preConfig)
 	if status.Type != 0 {
 		errmsg := py.PyBytesToString(status.ErrMsg)
-		logger.Errorf("failed to preinitialize python: %s\n", errmsg)
-		return nil, errors.New(errmsg)
+		return py.NullThreadState, errors.New(errmsg)
 	}
 
 	/*
@@ -65,83 +177,120 @@ func newPythonProcessor(logger *service.Logger, conf *service.ParsedConfig) (*py
 	config.UserSiteDirectory = 0
 	config.InstallSignalHandlers = 0
 
-	// TODO: parameterize home dir
-	home := "/Users/dv/src/gogopython/venv"
 	status = py.PyConfig_SetBytesString(&config, &config.Home, home)
 	if status.Type != 0 {
 		errmsg := py.PyBytesToString(status.ErrMsg)
-		logger.Errorf("failed to set home: %s\n", errmsg)
-		return nil, errors.New(errmsg)
+		return py.NullThreadState, errors.New(errmsg)
 	}
-
-	// TODO: find paths or provide them in config
-	path := strings.Join([]string{
-		"/opt/homebrew/Cellar/python@3.12/3.12.4/Frameworks/Python.framework/Versions/3.12/lib/python3.12",
-		"/opt/homebrew/Cellar/python@3.12/3.12.4/Frameworks/Python.framework/Versions/3.12/lib/python3.12/lib-dynload",
-		"/Users/dv/src/gogopython/venv/lib/python3.12/site-packages",
-	}, ":")
+	path := strings.Join(paths, ":") // xxx ';' on windows
 	status = py.PyConfig_SetBytesString(&config, &config.PythonPathEnv, path)
 	if status.Type != 0 {
 		errmsg := py.PyBytesToString(status.ErrMsg)
-		logger.Errorf("failed to set path: %s\n", errmsg)
-		return nil, errors.New(errmsg)
+		return py.NullThreadState, errors.New(errmsg)
 	}
 	status = py.Py_InitializeFromConfig(&config)
 	if status.Type != 0 {
 		errmsg := py.PyBytesToString(status.ErrMsg)
-		logger.Errorf("failed to initialize Python: %s", errmsg)
-		return nil, errors.New(errmsg)
+		return py.NullThreadState, errors.New(errmsg)
 	}
 
-	// Save details on our Main interpreter, grab the GIL, and swap it out.
-	gil := py.PyGILState_Ensure()
-	mainStatePtr := py.PyThreadState_Get()
-	py.PyThreadState_Swap(py.NullThreadState)
+	// Save details on our Main thread state and drop GIL.
+	mainThreadState := py.PyEval_SaveThread()
 
+	return mainThreadState, nil
+}
+
+func initSubInterpreter(logger *service.Logger) (*subInterpreter, error) {
+	// Some of these args are required if we want to use Numpy, etc.
+	var subStatePtr py.PyThreadStatePtr
 	interpreterConfig := py.PyInterpreterConfig{}
 	interpreterConfig.Gil = py.DefaultGil // OwnGil works in 3.12, but is hard to use.
-	interpreterConfig.CheckMultiInterpExtensions = 1
+	interpreterConfig.CheckMultiInterpExtensions = 0
+	interpreterConfig.UseMainObMalloc = 1
 
-	var subStatePtr py.PyThreadStatePtr
-	status = py.Py_NewInterpreterFromConfig(&subStatePtr, &interpreterConfig)
+	// Cross your fingers...
+	status := py.Py_NewInterpreterFromConfig(&subStatePtr, &interpreterConfig)
 	if status.Type != 0 {
 		errmsg := py.PyBytesToString(status.ErrMsg)
 		logger.Errorf("failed to create sub-interpreter: %s", errmsg)
 		return nil, errors.New(errmsg)
 	}
-	logger.Info("created new subinterpreter")
-	py.PyThreadState_Swap(mainStatePtr)
 
-	py.PyGILState_Release(gil)
-	py.PyThreadState_Swap(py.NullThreadState)
+	// Collect our information and drop the GIL.
+	state := py.PyInterpreterState_Get()
+	ts := py.PyEval_SaveThread()
 
+	return &subInterpreter{
+		originalTs: ts,
+		state:      state,
+	}, nil
+}
+
+func newPythonProcessor(logger *service.Logger, conf *service.ParsedConfig) (*pythonProcessor, error) {
+	script, err := conf.FieldString("script")
+	if err != nil {
+		return nil, err
+	}
+
+	chanMtx.Lock()
+	toMain <- PYTHON_SPAWN
+	r := <-fromMain
+	chanMtx.Unlock()
+
+	if r.err != nil {
+		return nil, err
+	}
+
+	i := processorCnt.Add(1)
+
+	logger.Infof("processor cnt: %d\n", i)
 	return &pythonProcessor{
-		logger:    logger,
-		config:    config,
-		mainState: mainStatePtr,
-		subState:  subStatePtr,
-		script:    script,
+		logger: logger,
+		script: script,
+		state:  r.state,
+		closed: false,
 	}, nil
 }
 
 func (p *pythonProcessor) Process(ctx context.Context, m *service.Message) (service.MessageBatch, error) {
 
 	p.logger.Info("processing message")
+	runtime.LockOSThread()
 
-	py.PyThreadState_Swap(p.subState)
+	// We can't trust we're on the same OS thread as before, so we're forced to do this dance.
+	ts := py.PyThreadState_New(p.state)
+	py.PyEval_RestoreThread(ts)
 
+	// Make python go now.
 	py.PyRun_SimpleString(p.script)
 
-	py.PyThreadState_Swap(py.NullThreadState)
+	// Clean up our thread state. No idea how to reuse it safely :(
+	py.PyThreadState_Clear(ts)
+	py.PyThreadState_DeleteCurrent()
+
+	runtime.UnlockOSThread()
 
 	return []*service.Message{m}, nil
 }
 
 func (p *pythonProcessor) Close(ctx context.Context) error {
-	// If these fail, you get fireworks :D
 
-	//py.PyGILState_Release(p.gil)
-	//py.Py_FinalizeEx()
+	if p.closed {
+		return nil
+	}
+	p.closed = true
+
+	if processorCnt.Add(-1) == 0 {
+		p.logger.Info("last one...telling main interpreter to clean up")
+		chanMtx.Lock()
+		toMain <- PYTHON_STOP
+		r := <-fromMain
+		chanMtx.Unlock()
+
+		if r.err != nil {
+			return r.err
+		}
+	}
 
 	return nil
 }
