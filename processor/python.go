@@ -37,6 +37,7 @@ var chanMtx sync.Mutex
 type subInterpreter struct {
 	originalTs py.PyThreadStatePtr
 	state      py.PyInterpreterStatePtr
+	id         int64
 }
 
 type pythonProcessor struct {
@@ -95,7 +96,7 @@ func mainPython(home string, paths []string, logger *service.Logger) {
 	started := false
 	keepGoing := true
 
-	//mainThreadState := py.NullThreadState
+	mainThreadState := py.NullThreadState
 	subInterpeters := make([]subInterpreter, 0)
 
 	runtime.LockOSThread()
@@ -106,7 +107,7 @@ func mainPython(home string, paths []string, logger *service.Logger) {
 		case PYTHON_START:
 			if !started {
 				logger.Info("starting python interpreter")
-				_, err := initPythonOnce(home, paths)
+				mainThreadState, err := initPythonOnce(home, paths)
 				if err != nil {
 					keepGoing = false
 					logger.Errorf("failed to start python interpreter: %s", err)
@@ -120,9 +121,11 @@ func mainPython(home string, paths []string, logger *service.Logger) {
 		case PYTHON_STOP:
 			if started {
 				keepGoing = false
+				for _, s := range subInterpeters {
+					stopSubInterpreter(s, mainThreadState, logger)
+				}
 				logger.Info("stopping")
 				logger.Info("XXX finish me")
-				logger.Infof("xxx close %d interpreters", len(subInterpeters))
 			} else {
 				logger.Warn("interpreter not running")
 				fromMain <- reply{err: errors.New("interpreter not running")}
@@ -218,11 +221,13 @@ func initSubInterpreter(logger *service.Logger) (*subInterpreter, error) {
 
 	// Collect our information and drop the GIL.
 	state := py.PyInterpreterState_Get()
+	id := py.PyInterpreterState_GetID(state)
 	ts := py.PyEval_SaveThread()
 
 	return &subInterpreter{
 		originalTs: ts,
 		state:      state,
+		id:         id,
 	}, nil
 }
 
@@ -271,6 +276,20 @@ func (p *pythonProcessor) Process(ctx context.Context, m *service.Message) (serv
 	runtime.UnlockOSThread()
 
 	return []*service.Message{m}, nil
+}
+
+func stopSubInterpreter(s subInterpreter, mainState py.PyThreadStatePtr, logger *service.Logger) {
+	logger.Infof("stopping sub-interpreter %d\n", s.id)
+
+	py.PyEval_RestoreThread(s.originalTs)
+	py.PyThreadState_Clear(s.originalTs)
+
+	py.PyInterpreterState_Clear(s.state)
+	py.PyInterpreterState_Delete(s.state)
+
+	py.PyEval_RestoreThread(mainState)
+
+	logger.Infof("stopped sub-interpreter %d\n", s.id)
 }
 
 func (p *pythonProcessor) Close(ctx context.Context) error {
