@@ -107,11 +107,13 @@ func mainPython(home string, paths []string, logger *service.Logger) {
 		case PYTHON_START:
 			if !started {
 				logger.Info("starting python interpreter")
-				mainThreadState, err := initPythonOnce(home, paths)
+				var err error
+				mainThreadState, err = initPythonOnce(home, paths)
 				if err != nil {
 					keepGoing = false
 					logger.Errorf("failed to start python interpreter: %s", err)
 				}
+				started = true
 				fromMain <- reply{err: err}
 			} else {
 				logger.Warn("interpreter already started")
@@ -124,8 +126,12 @@ func mainPython(home string, paths []string, logger *service.Logger) {
 				for _, s := range subInterpeters {
 					stopSubInterpreter(s, mainThreadState, logger)
 				}
-				logger.Info("stopping")
-				logger.Info("XXX finish me")
+				if py.Py_FinalizeEx() != 0 {
+					// The chance we get here *without* an explosion is slim, but why not.
+					fromMain <- reply{err: errors.New("failed to shutdown python")}
+				} else {
+					fromMain <- reply{}
+				}
 			} else {
 				logger.Warn("interpreter not running")
 				fromMain <- reply{err: errors.New("interpreter not running")}
