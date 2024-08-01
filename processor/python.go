@@ -224,7 +224,7 @@ func initPythonOnce(exe, home string, paths []string) (py.PyThreadStatePtr, erro
 	config := py.PyConfig_3_12{}
 	py.PyConfig_InitPythonConfig(&config)
 	config.ParseArgv = 0
-	config.SafePath = 1
+	config.SafePath = 0
 	config.UserSiteDirectory = 0
 	config.InstallSignalHandlers = 0
 
@@ -258,6 +258,7 @@ func initSubInterpreter(logger *service.Logger) (*subInterpreter, error) {
 	interpreterConfig.Gil = py.DefaultGil // OwnGil works in 3.12, but is hard to use.
 	interpreterConfig.CheckMultiInterpExtensions = 0
 	interpreterConfig.UseMainObMalloc = 1
+	interpreterConfig.AllowThreads = 1
 
 	// Cross your fingers...
 	status := py.Py_NewInterpreterFromConfig(&subStatePtr, &interpreterConfig)
@@ -334,7 +335,7 @@ func (p *pythonProcessor) Process(ctx context.Context, m *service.Message) (serv
 	// For now, we'll use a bit of a hack to create a `content()` function.
 	globals := py.PyDict_New() // xxx can we save this between runs? There must be a way.
 	locals := py.PyDict_New()
-	py.PyDict_SetItemString(locals, "root", py.PyDict_New())
+	// py.PyDict_SetItemString(locals, "root", py.PyDict_New())
 
 	if py.PyRun_String(def_content, py.PyFileInput, globals, locals) == py.NullPyObjectPtr {
 		p.logger.Warn("something failed preparing content()!!!")
@@ -356,10 +357,12 @@ func (p *pythonProcessor) Process(ctx context.Context, m *service.Message) (serv
 				root := py.PyDict_GetItemString(locals, "root")
 				switch py.Py_BaseType(root) {
 				case py.None:
+					p.logger.Warn("wtf")
 					batch = []*service.Message{}
 				case py.Unknown:
 					// pass through for now, but warn
 					p.logger.Warn("could not find a valid 'root'")
+					py.PyErr_Print()
 					batch = []*service.Message{m}
 				case py.Long:
 					// todo: we can handle this :)

@@ -21,9 +21,13 @@ pipeline:
             msg = json.loads(data)["title"]
           except:
             msg = "nothing :("
+          root = dict()
           root["msg"] = f"You said: '{msg}'"
           root["at"] = time.ctime()
-          root["ip"] = requests.get("https://api.ipify.org").text
+          try:
+            root["ip"] = requests.get("https://api.ipify.org").text
+          except:
+            root["ip"] = "no internet?"
 
 output:
   stdout: {}
