@@ -13,7 +13,9 @@ pipeline:
         exe: ./venv/bin/python3
         script: |
           import json
+          import requests
           import time
+
           data = content()
           try:
             msg = json.loads(data)["title"]
@@ -21,6 +23,7 @@ pipeline:
             msg = "nothing :("
           root["msg"] = f"You said: '{msg}'"
           root["at"] = time.ctime()
+          root["ip"] = requests.get("https://api.ipify.org").text
 
 output:
   stdout: {}
