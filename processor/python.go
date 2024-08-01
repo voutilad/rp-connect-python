@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"unsafe"
 
 	"github.com/redpanda-data/benthos/v4/public/service"
 
@@ -304,7 +305,16 @@ func newPythonProcessor(logger *service.Logger, conf *service.ParsedConfig) (*py
 	}, nil
 }
 
+const def_content = `
+global content
+def content():
+	# Returns the content of the message being processed.
+	global __content__
+	return __content__
+`
+
 func (p *pythonProcessor) Process(ctx context.Context, m *service.Message) (service.MessageBatch, error) {
+	var err error = nil
 	p.logger.Info("processing message")
 
 	// We need to lock our OS thread so Go won't screw us.
@@ -314,8 +324,32 @@ func (p *pythonProcessor) Process(ctx context.Context, m *service.Message) (serv
 	ts := py.PyThreadState_New(p.state)
 	py.PyEval_RestoreThread(ts)
 
-	// Make Python go now.
-	py.PyRun_SimpleString(p.script)
+	// We need to set up some bindings so the script can actually _do_ something with our message.
+	// For now, we'll use a bit of a hack to create a `content()` function.
+	globals := py.PyDict_New() // xxx can we save this between runs? There must be a way.
+	locals := py.PyDict_New()
+
+	if py.PyRun_String(def_content, py.PyFileInput, globals, locals) == py.NullPyObjectPtr {
+		p.logger.Warn("something failed preparing content()!!!")
+	} else {
+		var data []byte
+		data, err = m.AsBytes()
+		if err == nil {
+			bytes := py.PyBytes_FromStringAndSize(unsafe.SliceData(data), len(data))
+			if bytes == py.NullPyObjectPtr {
+				err = errors.New("failed to create Python bytes")
+			} else {
+				_ = py.PyDict_SetItemString(globals, "__content__", bytes)
+				// xxx check return value
+				result := py.PyRun_String(p.script, py.PyFileInput, globals, locals)
+				if result == py.NullPyObjectPtr {
+					// todo: extract exception?
+					err = errors.New("something rotten in your python?")
+				}
+				// todo: extract "root" from locals
+			}
+		}
+	}
 
 	// Clean up our thread state. Impossible to re-use safely with Go.
 	py.PyThreadState_Clear(ts)
@@ -324,7 +358,8 @@ func (p *pythonProcessor) Process(ctx context.Context, m *service.Message) (serv
 	// Ok for Go to do its thing again.
 	runtime.UnlockOSThread()
 
-	return []*service.Message{m}, nil
+	// For now, don't drop the message
+	return []*service.Message{m}, err
 }
 
 // Teardown a Sub-Interpreter and delete its state. This will probably trigger a lot of Python

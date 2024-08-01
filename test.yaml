@@ -10,7 +10,8 @@ pipeline:
         exe: ./venv/bin/python3
         script: |
           import time
-          print(f"the time is now {time.ctime()}")
+          msg = content().decode()
+          print(f"the time is now {time.ctime()} and you said: '{msg}'")
 
 output:
   stdout: {}
