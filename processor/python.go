@@ -18,7 +18,6 @@ import (
 
 var processorCnt atomic.Int32
 var started atomic.Bool
-var ready atomic.Bool
 
 type message int
 
@@ -72,7 +71,7 @@ func init() {
 					panic(err)
 				}
 				logger.Infof("finding path details for %s\n", exe)
-				helper := "'import sys; print(sys.prefix); [print(p) for p in sys.path if len(p) > 0]'"
+				helper := "import sys; print(sys.prefix); [print(p) for p in sys.path if len(p) > 0]"
 				cmd := exec.Command(exe, "-c", helper)
 				stdout, err := cmd.StdoutPipe()
 				if err != nil {
