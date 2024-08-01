@@ -100,7 +100,7 @@ func init() {
 				}
 
 				// We now become the Python charmer.
-				mainPython(home, paths, logger)
+				mainPython(exe, home, paths, logger)
 			}()
 
 			// Send our Start message
@@ -132,7 +132,7 @@ func init() {
 	}
 }
 
-func mainPython(home string, paths []string, logger *service.Logger) {
+func mainPython(exe, home string, paths []string, logger *service.Logger) {
 	pythonStarted := false
 	keepGoing := true
 
@@ -151,7 +151,7 @@ func mainPython(home string, paths []string, logger *service.Logger) {
 			if !pythonStarted {
 				logger.Info("starting python interpreter")
 				var err error
-				mainThreadState, err = initPythonOnce(home, paths)
+				mainThreadState, err = initPythonOnce(exe, home, paths)
 				if err != nil {
 					keepGoing = false
 					logger.Errorf("failed to start python interpreter: %s", err)
@@ -199,9 +199,9 @@ func mainPython(home string, paths []string, logger *service.Logger) {
 }
 
 // Initialize the main interpreter. Sub-interpreters are created by Processor instances.
-func initPythonOnce(home string, paths []string) (py.PyThreadStatePtr, error) {
+func initPythonOnce(exe, home string, paths []string) (py.PyThreadStatePtr, error) {
 	// Find and load the Python dynamic library.
-	err := py.Load_library()
+	err := py.Load_library(exe)
 	if err != nil {
 		return py.NullThreadState, err
 	}
