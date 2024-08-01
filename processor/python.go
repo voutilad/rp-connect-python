@@ -313,8 +313,14 @@ def content():
 	return __content__
 `
 
+const json_helper = `
+import json
+result = json.dumps(root).encode()
+`
+
 func (p *pythonProcessor) Process(ctx context.Context, m *service.Message) (service.MessageBatch, error) {
 	var err error = nil
+	var batch []*service.Message
 	p.logger.Info("processing message")
 
 	// We need to lock our OS thread so Go won't screw us.
@@ -328,6 +334,7 @@ func (p *pythonProcessor) Process(ctx context.Context, m *service.Message) (serv
 	// For now, we'll use a bit of a hack to create a `content()` function.
 	globals := py.PyDict_New() // xxx can we save this between runs? There must be a way.
 	locals := py.PyDict_New()
+	py.PyDict_SetItemString(locals, "root", py.PyDict_New())
 
 	if py.PyRun_String(def_content, py.PyFileInput, globals, locals) == py.NullPyObjectPtr {
 		p.logger.Warn("something failed preparing content()!!!")
@@ -346,7 +353,42 @@ func (p *pythonProcessor) Process(ctx context.Context, m *service.Message) (serv
 					// todo: extract exception?
 					err = errors.New("something rotten in your python?")
 				}
-				// todo: extract "root" from locals
+				root := py.PyDict_GetItemString(locals, "root")
+				switch py.Py_BaseType(root) {
+				case py.None:
+					batch = []*service.Message{}
+				case py.Unknown:
+					// pass through for now, but warn
+					p.logger.Warn("could not find a valid 'root'")
+					batch = []*service.Message{m}
+				case py.Long:
+					// todo: we can handle this :)
+					fallthrough
+				case py.String:
+					// todo: we can handle this :)
+					fallthrough
+				case py.Tuple:
+					fallthrough
+				case py.List:
+					fallthrough
+				case py.Dict:
+					// convert to json for now with python's help ;) because YOLO
+					result = py.PyRun_String(json_helper, py.PyFileInput, globals, locals)
+					if result == py.NullPyObjectPtr {
+						err = errors.New("failed to JSONify root")
+					} else {
+						// "result" should now be json as utf8 bytes
+						bytes := py.PyDict_GetItemString(locals, "result")
+						if bytes == py.NullPyObjectPtr {
+							err = errors.New("result disappeared, oh no")
+						} else {
+							sz := py.PyBytes_Size(bytes)
+							rawBytes := py.PyBytes_AsString(bytes)
+							m.SetBytes(unsafe.Slice(rawBytes, sz))
+							batch = []*service.Message{m}
+						}
+					}
+				}
 			}
 		}
 	}
@@ -359,7 +401,8 @@ func (p *pythonProcessor) Process(ctx context.Context, m *service.Message) (serv
 	runtime.UnlockOSThread()
 
 	// For now, don't drop the message
-	return []*service.Message{m}, err
+	// return []*service.Message{m}, err
+	return batch, err
 }
 
 // Teardown a Sub-Interpreter and delete its state. This will probably trigger a lot of Python

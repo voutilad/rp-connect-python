@@ -5,7 +5,7 @@ go 1.22.5
 require (
 	github.com/redpanda-data/benthos/v4 v4.33.0
 	github.com/redpanda-data/connect/public/bundle/free/v4 v4.31.0
-	github.com/voutilad/gogopython v0.3.0
+	github.com/voutilad/gogopython v0.4.0
 )
 
 require (

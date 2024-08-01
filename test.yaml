@@ -1,17 +1,26 @@
 input:
   generate:
-    count: 5
-    interval: 10ms
-    mapping: root = "i do nothing"
+    count: 3
+    interval: 1s
+    mapping: |
+      root.title = "this is a test"
+      root.uuid = uuid_v4()
+      root.i = counter()
 
 pipeline:
   processors:
     - python:
         exe: ./venv/bin/python3
         script: |
+          import json
           import time
-          msg = content().decode()
-          print(f"the time is now {time.ctime()} and you said: '{msg}'")
+          data = content()
+          try:
+            msg = json.loads(data)["title"]
+          except:
+            msg = "nothing :("
+          root["msg"] = f"You said: '{msg}'"
+          root["at"] = time.ctime()
 
 output:
   stdout: {}
