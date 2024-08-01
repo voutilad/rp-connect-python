@@ -334,7 +334,7 @@ func (p *pythonProcessor) Process(ctx context.Context, m *service.Message) (serv
 	// For now, we'll use a bit of a hack to create a `content()` function.
 	globals := py.PyDict_New() // xxx can we save this between runs? There must be a way.
 	locals := py.PyDict_New()
-	// py.PyDict_SetItemString(locals, "root", py.PyDict_New())
+	py.PyDict_SetItemString(locals, "root", py.PyDict_New())
 
 	if py.PyRun_String(def_content, py.PyFileInput, globals, locals) == py.NullPyObjectPtr {
 		p.logger.Warn("something failed preparing content()!!!")

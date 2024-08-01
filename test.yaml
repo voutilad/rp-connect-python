@@ -21,7 +21,6 @@ pipeline:
             msg = json.loads(data)["title"]
           except:
             msg = "nothing :("
-          root = dict()
           root["msg"] = f"You said: '{msg}'"
           root["at"] = time.ctime()
           try:
