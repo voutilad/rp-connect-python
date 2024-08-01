@@ -26,6 +26,13 @@ $ echo My voice is my passport | ./rp-connect-python run --log.level=off rot13.y
 "Zl ibvpr vf zl cnffcbeg"
 ```
 
+Currently, the sub-interpreter that runs your code provides two hooks back into
+Redpanda Connect:
+
+- `content()` -- similar to the bloblang function, it returns the `bytes` of a message
+- `root` -- this is a `dict` in scope by default, so you can readily assign key/values,
+  or you can replace it with a new object like `root = "junk"`
+
 ## Requirements
 - Python 3.12
 - `setuptools` (makes it so much easier to find libpython, just `pip install` it)
