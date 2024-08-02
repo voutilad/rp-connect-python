@@ -23,6 +23,8 @@ type pythonProcessor struct {
 	exe    string
 	script string
 	closed atomic.Bool
+	tState py.PyThreadStatePtr
+	mtx    sync.Mutex
 }
 
 var pythonExe string = ""
@@ -128,13 +130,18 @@ func (p *pythonProcessor) Process(ctx context.Context, m *service.Message) (serv
 	var batch []*service.Message
 	p.logger.Info("processing message")
 
+	p.mtx.Lock()
+	defer p.mtx.Unlock()
+
 	// We need to lock our OS thread so Go won't screw us.
 	runtime.LockOSThread()
 
 	// We may be on a *new* OS thread since the last time, so play it safe and make new state.
 	// TODO: only flush if we detect we've drifted OS threads?
-	ts := py.PyThreadState_New(p.state)
-	py.PyEval_RestoreThread(ts)
+	if p.tState == py.NullThreadState {
+		p.tState = py.PyThreadState_New(p.state)
+	}
+	py.PyEval_RestoreThread(p.tState)
 
 	// We need to set up some bindings so the script can actually _do_ something with our message.
 	// For now, we'll use a bit of a hack to create a `content()` function.
@@ -223,8 +230,9 @@ func (p *pythonProcessor) Process(ctx context.Context, m *service.Message) (serv
 	py.Py_DecRef(locals)
 
 	// Clean up our thread state. Impossible to re-use safely with Go.
-	py.PyThreadState_Clear(ts)
-	py.PyThreadState_DeleteCurrent()
+	// py.PyThreadState_Clear(p.tState)
+	//py.PyThreadState_DeleteCurrent()
+	py.PyEval_SaveThread()
 
 	// Ok for Go to do its thing again.
 	runtime.UnlockOSThread()
@@ -241,6 +249,16 @@ func (p *pythonProcessor) Close(ctx context.Context) error {
 	if !p.closed.CompareAndSwap(false, true) {
 		return nil
 	}
+
+	p.mtx.Lock()
+	runtime.LockOSThread()
+	py.PyEval_RestoreThread(p.tState)
+	p.logger.Trace("restored thread state")
+	py.PyThreadState_Clear(p.tState)
+	p.logger.Trace("cleared thread state")
+	py.PyThreadState_DeleteCurrent()
+	p.logger.Trace("deleted current thread")
+	runtime.UnlockOSThread()
 
 	if processorCnt.Add(-1) == 0 {
 		// Look up or create a Runtime.
