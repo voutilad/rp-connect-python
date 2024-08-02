@@ -5,6 +5,7 @@ import (
 	"errors"
 	"github.com/voutilad/rp-connect-python/internal/impl/python"
 	"runtime"
+	"sync"
 	"sync/atomic"
 	"time"
 	"unsafe"
@@ -19,9 +20,13 @@ var processorCnt atomic.Int32
 type pythonProcessor struct {
 	logger *service.Logger
 	state  py.PyInterpreterStatePtr
+	exe    string
 	script string
 	closed atomic.Bool
 }
+
+var runtimes map[string]*python.Runtime
+var runtimeMtx sync.Mutex
 
 // Initialize the Python processor Redpanda Connect module.
 //
@@ -30,6 +35,7 @@ type pythonProcessor struct {
 func init() {
 	// Initialize globals.
 	processorCnt.Store(0)
+	runtimes = make(map[string]*python.Runtime)
 
 	configSpec := service.
 		NewConfigSpec().
@@ -54,31 +60,43 @@ func constructor(conf *service.ParsedConfig, mgr *service.Resources) (service.Pr
 	if err != nil {
 		panic(err)
 	}
-	home, paths, err := py.FindPythonHomeAndPaths(exe)
-	if err != nil {
-		panic(err)
-	}
 	script, err := conf.FieldString("script")
 	if err != nil {
 		return nil, err
 	}
 
-	// Start the runtime.
-	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(time.Second*3))
+	// Look up or create a Runtime.
+	runtimeMtx.Lock()
+	r, ok := runtimes[exe]
+	if !ok {
+		r, err = python.New(exe)
+		if err != nil {
+			runtimeMtx.Unlock()
+			return nil, err
+		}
+		runtimes[exe] = r
+	}
+	runtimeMtx.Unlock()
+
+	// We'll give ourselves 10 seconds to initialize.
+	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(time.Second*10))
 	defer cancel()
-	err = python.Start(python.Config{Exe: exe, Home: home, Paths: paths}, ctx, mgr.Logger())
+
+	// Start the runtime.
+	err = r.Start(ctx, mgr.Logger())
 	if err != nil {
 		return nil, err
 	}
 
 	// Start a sub-interpreter.
-	state, err := python.NewSubInterpreter(ctx)
+	state, err := r.Spawn(ctx)
 	if err != nil {
 		return nil, err
 	}
 
+	// XXX this is not good and will be global across all runtimes.
 	processorCnt.Add(1)
-	return &pythonProcessor{logger: mgr.Logger(), script: script, state: state}, nil
+	return &pythonProcessor{logger: mgr.Logger(), exe: exe, script: script, state: state}, nil
 }
 
 // Python helper for initializing a content function in the global state.
@@ -200,7 +218,14 @@ func (p *pythonProcessor) Close(ctx context.Context) error {
 	}
 
 	if processorCnt.Add(-1) == 0 {
-		return python.Stop(ctx)
+		// Look up or create a Runtime.
+		runtimeMtx.Lock()
+		r, ok := runtimes[p.exe]
+		runtimeMtx.Unlock()
+		if !ok {
+			return errors.New("runtime disappeared")
+		}
+		return r.Stop(ctx)
 	}
 
 	return nil
