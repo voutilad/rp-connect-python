@@ -57,4 +57,4 @@ deactivate
 
 ## known issues/requirements
 - tested on macOS/arm64 and Linux/{arm64,amd64}
-- haven't checked refcnt handling yet of PyObjects
+- you can only use one Python binary across all Python processors
