@@ -1014,6 +1014,8 @@ github.com/voutilad/gogopython v0.4.2 h1:N1QXtM6j7KKtnWU0zw4+Gfsg9Ffi/OCxaBfaIMP
 github.com/voutilad/gogopython v0.4.2/go.mod h1:ZGCFC/OXFNHhCtO+4qC+sooSpJtTse3gyioCefvL3WA=
 github.com/voutilad/gogopython v0.4.3 h1:IoITaanDk38Un++5YzgbYXggfsKOAdyBMCyLcJ4+68k=
 github.com/voutilad/gogopython v0.4.3/go.mod h1:ZGCFC/OXFNHhCtO+4qC+sooSpJtTse3gyioCefvL3WA=
+github.com/voutilad/gogopython v0.5.0 h1:pHoOmaLStZ6a9mE3cEFNaJLwX6bdz0y5hDdQHqKH+lg=
+github.com/voutilad/gogopython v0.5.0/go.mod h1:ZGCFC/OXFNHhCtO+4qC+sooSpJtTse3gyioCefvL3WA=
 github.com/wI2L/jsondiff v0.4.0 h1:iP56F9tK83eiLttg3YdmEENtZnwlYd3ezEpNNnfZVyM=
 github.com/wI2L/jsondiff v0.4.0/go.mod h1:nR/vyy1efuDeAtMwc3AF6nZf/2LD1ID8GTyyJ+K8YB0=
 github.com/xdg-go/pbkdf2 v1.0.0 h1:Su7DPu48wXMwC3bs7MCNG+z4FhcyEuz5dlvchbq0B0c=
