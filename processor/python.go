@@ -25,8 +25,9 @@ type pythonProcessor struct {
 	closed atomic.Bool
 }
 
-var runtimes map[string]*python.Runtime
-var runtimeMtx sync.Mutex
+var pythonExe string = ""
+var pythonRuntime *python.Runtime
+var pythonMtx sync.Mutex
 
 // Initialize the Python processor Redpanda Connect module.
 //
@@ -35,7 +36,6 @@ var runtimeMtx sync.Mutex
 func init() {
 	// Initialize globals.
 	processorCnt.Store(0)
-	runtimes = make(map[string]*python.Runtime)
 
 	configSpec := service.
 		NewConfigSpec().
@@ -66,30 +66,32 @@ func constructor(conf *service.ParsedConfig, mgr *service.Resources) (service.Pr
 	}
 
 	// Look up or create a Runtime.
-	runtimeMtx.Lock()
-	r, ok := runtimes[exe]
-	if !ok {
-		r, err = python.New(exe)
+	pythonMtx.Lock()
+	if pythonExe == "" {
+		r, err := python.New(exe)
 		if err != nil {
-			runtimeMtx.Unlock()
 			return nil, err
 		}
-		runtimes[exe] = r
+		pythonRuntime = r
+		pythonExe = exe
+	} else if pythonExe != exe {
+		pythonMtx.Unlock()
+		return nil, errors.New("multiple python processors must use the same exe")
 	}
-	runtimeMtx.Unlock()
+	pythonMtx.Unlock()
 
 	// We'll give ourselves 10 seconds to initialize.
 	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(time.Second*10))
 	defer cancel()
 
 	// Start the runtime.
-	err = r.Start(ctx, mgr.Logger())
+	err = pythonRuntime.Start(ctx, mgr.Logger())
 	if err != nil {
 		return nil, err
 	}
 
 	// Start a sub-interpreter.
-	state, err := r.Spawn(ctx)
+	state, err := pythonRuntime.Spawn(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -111,8 +113,11 @@ def content():
 // Python helper for serializing the "result" of a processor.
 const jsonHelper = `
 import json
-try: 
-	result = json.dumps(root).encode()
+try:
+	if type(root) is str:
+		result = root.encode()
+	else:
+		result = json.dumps(root).encode()
 except:
 	result = None
 `
@@ -219,10 +224,10 @@ func (p *pythonProcessor) Close(ctx context.Context) error {
 
 	if processorCnt.Add(-1) == 0 {
 		// Look up or create a Runtime.
-		runtimeMtx.Lock()
-		r, ok := runtimes[p.exe]
-		runtimeMtx.Unlock()
-		if !ok {
+		pythonMtx.Lock()
+		r := pythonRuntime
+		pythonMtx.Unlock()
+		if r == nil {
 			return errors.New("runtime disappeared")
 		}
 		return r.Stop(ctx)

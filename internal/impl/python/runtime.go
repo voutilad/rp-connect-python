@@ -12,9 +12,6 @@ import (
 	py "github.com/voutilad/gogopython"
 )
 
-// Atomic used to flagging if we're already launched the Python runtime.
-var started atomic.Bool
-
 // Request the Python runtime Go routine perform an action.
 type request int
 
@@ -76,21 +73,33 @@ func New(exe string) (*Runtime, error) {
 //
 // This is idempotent. Multiple calls to Start will do nothing and return nil.
 func (r *Runtime) Start(ctx context.Context, logger *service.Logger) error {
-	if r.started.CompareAndSwap(false, true) {
-		go r.mainPython(logger)
-	}
-
-	// Tell it to start.
 	r.mtx.Lock()
 	defer r.mtx.Unlock()
-	r.to <- pythonStart
-	select {
-	case reply := <-r.from:
-		if reply.err != nil {
-			return reply.err
+
+	if r.started.CompareAndSwap(false, true) {
+		go r.mainPython(logger)
+
+		// Tell it to start.
+		r.to <- pythonStart
+		select {
+		case reply := <-r.from:
+			if reply.err != nil {
+				return reply.err
+			}
+		case <-ctx.Done():
+			return errors.New("interrupted")
 		}
-	case <-ctx.Done():
-		return errors.New("interrupted")
+	} else {
+		// Already started. Just check status.
+		r.to <- pythonStatus
+		select {
+		case reply := <-r.from:
+			if reply.err != nil {
+				return reply.err
+			}
+		case <-ctx.Done():
+			return errors.New("interrupted")
+		}
 	}
 	return nil
 }
@@ -137,7 +146,7 @@ func (r *Runtime) Spawn(ctx context.Context) (py.PyInterpreterStatePtr, error) {
 // cleanup under the hood.
 //
 // Note: This returns void because most of these calls are fatal.
-func stopSubInterpreter(s subInterpreter, mainState py.PyThreadStatePtr, logger *service.Logger) {
+func stopSubInterpreter(s subInterpreter, logger *service.Logger) {
 	logger.Debugf("stopping sub-interpreter %d\n", s.id)
 
 	// We should be running from the main Go routine. Load the original
@@ -148,9 +157,6 @@ func stopSubInterpreter(s subInterpreter, mainState py.PyThreadStatePtr, logger 
 	// Clean up the ThreadState. Clear *must* be called before Delete.
 	py.PyInterpreterState_Clear(s.state)
 	py.PyInterpreterState_Delete(s.state)
-
-	// Restore the original/main ThreadState to assist next invocation.
-	py.PyEval_RestoreThread(mainState)
 
 	logger.Debugf("stopped sub-interpreter %d\n", s.id)
 }
@@ -202,12 +208,15 @@ func (r *Runtime) mainPython(logger *service.Logger) {
 			if pythonStarted {
 				keepGoing = false
 				for _, s := range subInterpreters {
-					stopSubInterpreter(s, mainThreadState, logger)
+					stopSubInterpreter(s, logger)
 				}
+				py.PyEval_RestoreThread(mainThreadState)
+				logger.Debug("tearing down Python")
 				if py.Py_FinalizeEx() != 0 {
 					// The chance we get here *without* an explosion is slim, but why not.
 					r.from <- reply{err: errors.New("failed to shutdown python")}
 				} else {
+					logger.Debug("Python stopped")
 					r.from <- reply{}
 				}
 			} else {
@@ -217,13 +226,14 @@ func (r *Runtime) mainPython(logger *service.Logger) {
 
 		case pythonSpawn:
 			if pythonStarted {
-				logger.Info("spawning a new sub-interpreter")
+				logger.Debug("spawning a new sub-interpreter")
 				sub, err := initSubInterpreter(logger)
 				if err != nil {
 					keepGoing = false
 					logger.Warn("failed to create sub-interpreter")
 					r.from <- reply{err: err}
 				} else {
+					logger.Debugf("spawned sub-interpreter %d\n", sub.id)
 					subInterpreters = append(subInterpreters, *sub)
 					r.from <- reply{state: sub.state}
 				}
@@ -239,18 +249,13 @@ func (r *Runtime) mainPython(logger *service.Logger) {
 	}
 }
 
-// Initialize the main Python interpreter. (Sub-interpreters are created by
-// Processor instances.) Should only be called once!
-//
-// Returns the Python thread state on success.
-// On failure, returns a null Python thread state and an error.
-func initPython(exe, home string, paths []string) (py.PyThreadStatePtr, error) {
+// Load the Python runtime libraries and pre-initialize the environment.
+func loadPython(exe string) error {
 	// Find and load the Python dynamic library.
 	err := py.Load_library(exe)
 	if err != nil {
-		return py.NullThreadState, err
+		return err
 	}
-
 	// Pre-configure the Python Interpreter. Not 100% necessary, but gives us
 	// more control and identifies errors early.
 	preConfig := py.PyPreConfig{}
@@ -258,7 +263,21 @@ func initPython(exe, home string, paths []string) (py.PyThreadStatePtr, error) {
 	status := py.Py_PreInitialize(&preConfig)
 	if status.Type != 0 {
 		errMsg := py.PyBytesToString(status.ErrMsg)
-		return py.NullThreadState, errors.New(errMsg)
+		return errors.New(errMsg)
+	}
+	return nil
+}
+
+// Initialize the main Python interpreter. (Sub-interpreters are created by
+// Processor instances.) Should only be called once!
+//
+// Returns the Python thread state on success.
+// On failure, returns a null Python thread state and an error.
+func initPython(exe, home string, paths []string) (py.PyThreadStatePtr, error) {
+	// Load our dynamic libraries.
+	err := loadPython(exe)
+	if err != nil {
+		return py.NullThreadState, err
 	}
 
 	// Configure our Paths. We need to approximate an isolated pyConfig from a
@@ -273,7 +292,7 @@ func initPython(exe, home string, paths []string) (py.PyThreadStatePtr, error) {
 
 	// We need to write funky wchar_t strings to our config, so we do a little
 	// dance with some helper functions.
-	status = py.PyConfig_SetBytesString(&pyConfig, &pyConfig.Home, home)
+	status := py.PyConfig_SetBytesString(&pyConfig, &pyConfig.Home, home)
 	if status.Type != 0 {
 		errMsg := py.PyBytesToString(status.ErrMsg)
 		return py.NullThreadState, errors.New(errMsg)
@@ -303,7 +322,7 @@ func initSubInterpreter(logger *service.Logger) (*subInterpreter, error) {
 	// Some of these args are required if we want to use Numpy, etc.
 	var subStatePtr py.PyThreadStatePtr
 	interpreterConfig := py.PyInterpreterConfig{}
-	interpreterConfig.Gil = py.DefaultGil            // OwnGil works in 3.12, but is hard to use.
+	interpreterConfig.Gil = py.OwnGil                // OwnGil works in 3.12, but is hard to use.
 	interpreterConfig.CheckMultiInterpExtensions = 0 // Numpy uses "legacy" extensions.
 	interpreterConfig.UseMainObMalloc = 1            // This must be 1 if using "legacy" extensions.
 	interpreterConfig.AllowThreads = 1               // Allow using threading library.
