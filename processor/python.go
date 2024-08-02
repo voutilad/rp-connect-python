@@ -140,7 +140,10 @@ func (p *pythonProcessor) Process(ctx context.Context, m *service.Message) (serv
 	// For now, we'll use a bit of a hack to create a `content()` function.
 	globals := py.PyDict_New() // xxx can we save this between runs? There must be a way.
 	locals := py.PyDict_New()
-	py.PyDict_SetItemString(locals, "root", py.PyDict_New())
+
+	empty := py.PyDict_New()
+	py.PyDict_SetItemString(locals, "root", empty)
+	py.Py_DecRef(empty)
 
 	if py.PyRun_String(defContent, py.PyFileInput, globals, locals) == py.NullPyObjectPtr {
 		p.logger.Warn("something failed preparing content()!!!")
@@ -148,17 +151,22 @@ func (p *pythonProcessor) Process(ctx context.Context, m *service.Message) (serv
 		var data []byte
 		data, err = m.AsBytes()
 		if err == nil {
+			// Will copy the underlying data into a new PyObject.
 			bytes := py.PyBytes_FromStringAndSize(unsafe.SliceData(data), len(data))
+
 			if bytes == py.NullPyObjectPtr {
 				err = errors.New("failed to create Python bytes")
 			} else {
 				_ = py.PyDict_SetItemString(globals, "__content__", bytes)
+				py.Py_DecRef(bytes)
 				// xxx check return value
 				result := py.PyRun_String(p.script, py.PyFileInput, globals, locals)
 				if result == py.NullPyObjectPtr {
 					py.PyErr_Print()
 					err = errors.New("problem executing Python script")
 				}
+
+				// XXX Gives us a borrowed reference to the item.
 				root := py.PyDict_GetItemString(locals, "root")
 				switch py.Py_BaseType(root) {
 				case py.None:
@@ -181,26 +189,38 @@ func (p *pythonProcessor) Process(ctx context.Context, m *service.Message) (serv
 					fallthrough
 				case py.Dict:
 					// Convert to JSON for now with Python's help ;) because YOLO
-					result = py.PyRun_String(jsonHelper, py.PyFileInput, globals, locals)
-					if result == py.NullPyObjectPtr {
+					convertResult := py.PyRun_String(jsonHelper, py.PyFileInput, globals, locals)
+					if convertResult == py.NullPyObjectPtr {
 						err = errors.New("failed to JSONify root")
 					} else {
+						// Not needed any longer.
+						py.Py_DecRef(convertResult)
+
 						// The "result" should now be JSON as utf8 bytes.
-						bytes := py.PyDict_GetItemString(locals, "result")
-						if bytes == py.NullPyObjectPtr {
+						resultBytes := py.PyDict_GetItemString(locals, "result")
+						if resultBytes == py.NullPyObjectPtr {
 							err = errors.New("result disappeared, oh no")
 						} else {
 							// Use [unsafe] to extract the message data.
-							sz := py.PyBytes_Size(bytes)
-							rawBytes := py.PyBytes_AsString(bytes)
-							m.SetBytes(unsafe.Slice(rawBytes, sz))
+							sz := py.PyBytes_Size(resultBytes)
+							rawBytes := py.PyBytes_AsString(resultBytes)
+
+							// Copy the data out from Python land.
+							buffer := make([]byte, sz)
+							copy(buffer, unsafe.Slice(rawBytes, sz))
+							m.SetBytes(buffer)
+
 							batch = []*service.Message{m}
 						}
 					}
 				}
+				py.Py_DecRef(result)
 			}
 		}
 	}
+
+	py.Py_DecRef(globals)
+	py.Py_DecRef(locals)
 
 	// Clean up our thread state. Impossible to re-use safely with Go.
 	py.PyThreadState_Clear(ts)
