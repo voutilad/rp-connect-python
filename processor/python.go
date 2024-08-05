@@ -18,18 +18,42 @@ import (
 var processorCnt atomic.Int32
 
 type pythonProcessor struct {
-	logger *service.Logger
-	state  py.PyInterpreterStatePtr
-	exe    string
-	script string
-	closed atomic.Bool
-	tState py.PyThreadStatePtr
-	mtx    sync.Mutex
+	logger           *service.Logger
+	exe              string
+	closed           atomic.Bool
+	interpreterState py.PyInterpreterStatePtr
+	threadState      py.PyThreadStatePtr
+	mtx              sync.Mutex
+	code             py.PyCodeObjectPtr
+	globalsHelper    py.PyCodeObjectPtr
+	jsonHelper       py.PyCodeObjectPtr
 }
 
-var pythonExe string = ""
+var pythonExe = ""
 var pythonRuntime *python.Runtime
 var pythonMtx sync.Mutex
+
+// Python helper for initializing a `content` function, returning bytes from
+// the globals mapping.
+const globalHelperSrc = `
+global content
+def content():
+	# Returns the content of the message being processed.
+	global __content__
+	return __content__
+`
+
+// Python helper for serializing the "result" of a processor.
+const jsonHelperSrc = `
+import json
+try:
+	if type(root) is str:
+		result = root.encode()
+	else:
+		result = json.dumps(root).encode()
+except:
+	result = None
+`
 
 // Initialize the Python processor Redpanda Connect module.
 //
@@ -56,6 +80,9 @@ func init() {
 }
 
 // Construct a new Python processor instance.
+//
+// This will create and initialize a new sub-interpreter from the main Python
+// Go routine and precompile some Python code objects.
 func constructor(conf *service.ParsedConfig, mgr *service.Resources) (service.Processor, error) {
 	// Extract our configuration.
 	exe, err := conf.FieldString("exe")
@@ -93,42 +120,60 @@ func constructor(conf *service.ParsedConfig, mgr *service.Resources) (service.Pr
 	}
 
 	// Start a sub-interpreter.
-	state, err := pythonRuntime.Spawn(ctx)
+	interpreterState, err := pythonRuntime.Spawn(ctx)
 	if err != nil {
 		return nil, err
 	}
 
-	// XXX this is not good and will be global across all runtimes.
+	// We're about to use the sub-interpreter, so lock our Go routine to a thread.
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+
+	// Create a new ThreadState.
+	threadState := py.PyThreadState_New(interpreterState)
+	py.PyEval_RestoreThread(threadState)
+
+	// Pre-compile our script and helpers.
+	code := py.Py_CompileString(script, "rp_connect_python.py", py.PyFileInput)
+	if code == py.NullPyCodeObjectPtr {
+		py.PyErr_Print()
+		return nil, errors.New("failed to compile python script")
+	}
+
+	// Pre-compile our script and helpers.
+	globalsHelper := py.Py_CompileString(globalHelperSrc, "__globals_helper__.py", py.PyFileInput)
+	if globalsHelper == py.NullPyCodeObjectPtr {
+		py.PyErr_Print()
+		return nil, errors.New("failed to compile python globals helper script")
+	}
+
+	// Pre-compile our script and helpers.
+	jsonHelper := py.Py_CompileString(jsonHelperSrc, "__json_helper__.py", py.PyFileInput)
+	if jsonHelper == py.NullPyCodeObjectPtr {
+		py.PyErr_Print()
+		return nil, errors.New("failed to compile python JSON helper script")
+	}
+
+	// XXX This is not good and will be global across all runtimes.
 	processorCnt.Add(1)
-	return &pythonProcessor{logger: mgr.Logger(), exe: exe, script: script, state: state}, nil
+
+	py.PyEval_SaveThread()
+
+	return &pythonProcessor{
+		logger:           mgr.Logger(),
+		exe:              exe,
+		interpreterState: interpreterState,
+		threadState:      threadState,
+		code:             code,
+		globalsHelper:    globalsHelper,
+		jsonHelper:       globalsHelper,
+	}, nil
 }
 
-// Python helper for initializing a content function in the global state.
-const defContent = `
-global content
-def content():
-	# Returns the content of the message being processed.
-	global __content__
-	return __content__
-`
-
-// Python helper for serializing the "result" of a processor.
-const jsonHelper = `
-import json
-try:
-	if type(root) is str:
-		result = root.encode()
-	else:
-		result = json.dumps(root).encode()
-except:
-	result = None
-`
-
 // Process a given Redpanda Connect service.Message using Python.
-func (p *pythonProcessor) Process(ctx context.Context, m *service.Message) (service.MessageBatch, error) {
+func (p *pythonProcessor) Process(_ context.Context, m *service.Message) (service.MessageBatch, error) {
 	var err error = nil
 	var batch []*service.Message
-	p.logger.Info("processing message")
 
 	p.mtx.Lock()
 	defer p.mtx.Unlock()
@@ -136,12 +181,7 @@ func (p *pythonProcessor) Process(ctx context.Context, m *service.Message) (serv
 	// We need to lock our OS thread so Go won't screw us.
 	runtime.LockOSThread()
 
-	// We may be on a *new* OS thread since the last time, so play it safe and make new state.
-	// TODO: only flush if we detect we've drifted OS threads?
-	if p.tState == py.NullThreadState {
-		p.tState = py.PyThreadState_New(p.state)
-	}
-	py.PyEval_RestoreThread(p.tState)
+	py.PyEval_RestoreThread(p.threadState)
 
 	// We need to set up some bindings so the script can actually _do_ something with our message.
 	// For now, we'll use a bit of a hack to create a `content()` function.
@@ -152,7 +192,7 @@ func (p *pythonProcessor) Process(ctx context.Context, m *service.Message) (serv
 	py.PyDict_SetItemString(locals, "root", empty)
 	py.Py_DecRef(empty)
 
-	if py.PyRun_String(defContent, py.PyFileInput, globals, locals) == py.NullPyObjectPtr {
+	if py.PyEval_EvalCode(p.globalsHelper, globals, locals) == py.NullPyObjectPtr {
 		p.logger.Warn("something failed preparing content()!!!")
 	} else {
 		var data []byte
@@ -167,7 +207,7 @@ func (p *pythonProcessor) Process(ctx context.Context, m *service.Message) (serv
 				_ = py.PyDict_SetItemString(globals, "__content__", bytes)
 				py.Py_DecRef(bytes)
 				// xxx check return value
-				result := py.PyRun_String(p.script, py.PyFileInput, globals, locals)
+				result := py.PyEval_EvalCode(p.code, globals, locals)
 				if result == py.NullPyObjectPtr {
 					py.PyErr_Print()
 					err = errors.New("problem executing Python script")
@@ -196,9 +236,9 @@ func (p *pythonProcessor) Process(ctx context.Context, m *service.Message) (serv
 					fallthrough
 				case py.Dict:
 					// Convert to JSON for now with Python's help ;) because YOLO
-					convertResult := py.PyRun_String(jsonHelper, py.PyFileInput, globals, locals)
+					convertResult := py.PyEval_EvalCode(p.jsonHelper, globals, locals)
 					if convertResult == py.NullPyObjectPtr {
-						err = errors.New("failed to JSONify root")
+						err = errors.New("failed to JSON-ify root")
 					} else {
 						// Not needed any longer.
 						py.Py_DecRef(convertResult)
@@ -229,12 +269,8 @@ func (p *pythonProcessor) Process(ctx context.Context, m *service.Message) (serv
 	py.Py_DecRef(globals)
 	py.Py_DecRef(locals)
 
-	// Clean up our thread state. Impossible to re-use safely with Go.
-	// py.PyThreadState_Clear(p.tState)
-	//py.PyThreadState_DeleteCurrent()
-	py.PyEval_SaveThread()
-
 	// Ok for Go to do its thing again.
+	py.PyEval_SaveThread()
 	runtime.UnlockOSThread()
 
 	return batch, err
@@ -252,13 +288,19 @@ func (p *pythonProcessor) Close(ctx context.Context) error {
 
 	p.mtx.Lock()
 	runtime.LockOSThread()
-	py.PyEval_RestoreThread(p.tState)
-	p.logger.Trace("restored thread state")
-	py.PyThreadState_Clear(p.tState)
-	p.logger.Trace("cleared thread state")
+	// Restore our thread state so we can clean things.
+	py.PyEval_RestoreThread(p.threadState)
+
+	// Clean-up code objects.
+	py.Py_DecRef(py.PyObjectPtr(p.code))
+	py.Py_DecRef(py.PyObjectPtr(p.globalsHelper))
+	py.Py_DecRef(py.PyObjectPtr(p.jsonHelper))
+
+	// Clean up our thread state.
+	py.PyThreadState_Clear(p.threadState)
 	py.PyThreadState_DeleteCurrent()
-	p.logger.Trace("deleted current thread")
 	runtime.UnlockOSThread()
+	p.mtx.Unlock()
 
 	if processorCnt.Add(-1) == 0 {
 		// Look up or create a Runtime.
