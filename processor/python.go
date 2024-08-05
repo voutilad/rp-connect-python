@@ -76,7 +76,10 @@ func init() {
 			Description("Python code to execute.")).
 		Field(service.NewStringField("exe").
 			Description("Path to a Python executable.").
-			Default("python3"))
+			Default("python3")).
+		Field(service.NewBoolField("legacy_mode").
+			Description("Run in a less smp-friendly manner to support NumPy.").
+			Default(false))
 
 	err := service.RegisterProcessor("python", configSpec, constructor)
 	if err != nil {
@@ -101,6 +104,10 @@ func constructor(conf *service.ParsedConfig, mgr *service.Resources) (service.Pr
 	if err != nil {
 		return nil, err
 	}
+	legacy_mode, err := conf.FieldBool("legacy_mode")
+	if err != nil {
+		return nil, err
+	}
 
 	// TODO: move collision detection into runtime.
 	// Look up or create a Runtime.
@@ -118,13 +125,17 @@ func constructor(conf *service.ParsedConfig, mgr *service.Resources) (service.Pr
 	}
 
 	// Start the runtime.
-	err = pythonRuntime.Start(context.Background(), mgr.Logger())
+	err = pythonRuntime.Start(context.Background(), mgr.Logger(), legacy_mode)
 	if err != nil {
 		return nil, err
 	}
 
 	// Start a few sub-interpreters.
-	num := runtime.NumCPU()
+	var num = runtime.NumCPU()
+	if legacy_mode {
+		logger.Info("Running in legacy mode")
+		// num = 1
+	}
 	interpreters := make([]interpreter, num)
 	tickets := make(chan int, num)
 
@@ -179,7 +190,7 @@ func constructor(conf *service.ParsedConfig, mgr *service.Resources) (service.Pr
 		runtime.UnlockOSThread()
 	}
 
-	logger.Infof("spawned %d sub-interpreters", len(interpreters))
+	logger.Infof("Spawned %d sub-interpreters", len(interpreters))
 
 	return &pythonProcessor{
 		logger:       logger,

@@ -16,10 +16,11 @@ import (
 type request int
 
 const (
-	pythonStart  request = iota // Start the runtime.
-	pythonStatus                // Are you alive?
-	pythonStop                  // Stop and shutdown sub-interpreters.
-	pythonSpawn                 // Span a new sub-interpreter.
+	pythonStart       request = iota // Start the runtime.
+	pythonStartLegacy                // Start the runtime, in legacy mode.
+	pythonStatus                     // Are you alive?
+	pythonStop                       // Stop and shutdown sub-interpreters.
+	pythonSpawn                      // Span a new sub-interpreter.
 )
 
 // Reply from the Python runtime Go routine in response to a Request.
@@ -36,15 +37,16 @@ type subInterpreter struct {
 }
 
 type Runtime struct {
-	exe     string          // Python exe (binary).
-	home    string          // Python home.
-	paths   []string        // Python package paths.
-	from    chan reply      // protected by mtx.
-	to      chan request    // protected by mtx.
-	mtx     sync.Mutex      // Mutex to protect channels ordering.
-	ctx     context.Context // Context to help cancel the runtime.
-	cancel  func()          // Cancellation function.
-	started atomic.Bool     // Flag to signal if the Go routine is running.
+	exe        string          // Python exe (binary).
+	home       string          // Python home.
+	paths      []string        // Python package paths.
+	from       chan reply      // protected by mtx.
+	to         chan request    // protected by mtx.
+	mtx        sync.Mutex      // Mutex to protect channels ordering.
+	ctx        context.Context // Context to help cancel the runtime.
+	cancel     func()          // Cancellation function.
+	started    atomic.Bool     // Flag to signal if the Go routine is running.
+	legacyMode bool            // Run in legacy mode? (e.g. for NumPy)
 }
 
 // New Runtime instance from the given Python executable.
@@ -72,15 +74,22 @@ func New(exe string) (*Runtime, error) {
 // Start the Python runtime.
 //
 // This is idempotent. Multiple calls to Start will do nothing and return nil.
-func (r *Runtime) Start(ctx context.Context, logger *service.Logger) error {
+func (r *Runtime) Start(ctx context.Context, logger *service.Logger, legacyMode bool) error {
 	r.mtx.Lock()
 	defer r.mtx.Unlock()
+
+	var startMode request
+	if legacyMode {
+		startMode = pythonStartLegacy
+	} else {
+		startMode = pythonStart
+	}
 
 	if r.started.CompareAndSwap(false, true) {
 		go r.mainPython(logger)
 
 		// Tell it to start.
-		r.to <- pythonStart
+		r.to <- startMode
 		select {
 		case reply := <-r.from:
 			if reply.err != nil {
@@ -143,7 +152,7 @@ func (r *Runtime) Spawn(ctx context.Context) (py.PyInterpreterStatePtr, py.PyThr
 //
 // Note: This returns void because most of these calls are fatal.
 func stopSubInterpreter(s subInterpreter, logger *service.Logger) {
-	logger.Debugf("stopping sub-interpreter %d\n", s.id)
+	logger.Tracef("Stopping sub-interpreter %d\n", s.id)
 
 	// We should be running from the main Go routine. Load the original
 	// Python ThreadState so we can clean up.
@@ -154,7 +163,7 @@ func stopSubInterpreter(s subInterpreter, logger *service.Logger) {
 	py.PyInterpreterState_Clear(s.state)
 	py.PyInterpreterState_Delete(s.state)
 
-	logger.Debugf("stopped sub-interpreter %d\n", s.id)
+	logger.Tracef("Stopped sub-interpreter %d\n", s.id)
 }
 
 // Primary "run loop" for main Python interpreter.
@@ -184,19 +193,21 @@ func (r *Runtime) mainPython(logger *service.Logger) {
 	for keepGoing {
 		msg := <-r.to
 		switch msg {
+		case pythonStartLegacy:
+			fallthrough
 		case pythonStart:
 			if !pythonStarted {
-				logger.Info("starting python interpreter")
+				logger.Info("Starting python interpreter")
 				var err error
 				mainThreadState, err = initPythonOnce()
 				if err != nil {
 					keepGoing = false
-					logger.Errorf("failed to start python interpreter: %s", err)
+					logger.Errorf("Failed to start python interpreter: %s", err)
 				}
 				pythonStarted = true
 				r.from <- reply{err: err}
 			} else {
-				logger.Warn("main interpreter already started")
+				logger.Warn("Main interpreter already started")
 				r.from <- reply{err: errors.New("main interpreter already started")}
 			}
 
@@ -207,29 +218,28 @@ func (r *Runtime) mainPython(logger *service.Logger) {
 					stopSubInterpreter(s, logger)
 				}
 				py.PyEval_RestoreThread(mainThreadState)
-				logger.Debug("tearing down Python")
+				logger.Trace("Tearing down Python")
 				if py.Py_FinalizeEx() != 0 {
 					// The chance we get here *without* an explosion is slim, but why not.
 					r.from <- reply{err: errors.New("failed to shutdown python")}
 				} else {
-					logger.Debug("Python stopped")
+					logger.Trace("Python stopped")
 					r.from <- reply{}
 				}
 			} else {
-				logger.Warn("main interpreter not running")
+				logger.Warn("Main interpreter not running")
 				r.from <- reply{err: errors.New("main interpreter not running")}
 			}
 
 		case pythonSpawn:
 			if pythonStarted {
-				logger.Debug("spawning a new sub-interpreter")
-				sub, err := initSubInterpreter(logger)
+				logger.Trace("spawning a new sub-interpreter")
+				sub, err := initSubInterpreter(r.legacyMode, logger)
 				if err != nil {
 					keepGoing = false
 					logger.Warn("failed to create sub-interpreter")
 					r.from <- reply{err: err}
 				} else {
-					logger.Debugf("spawned sub-interpreter %d\n", sub.id)
 					subInterpreters = append(subInterpreters, *sub)
 					r.from <- reply{interpreter: *sub}
 				}
@@ -314,15 +324,24 @@ func initPython(exe, home string, paths []string) (py.PyThreadStatePtr, error) {
 //
 // Relies on global Python state and being run only from the OS thread that
 // manages the runtime. Will potentially panic otherwise.
-func initSubInterpreter(logger *service.Logger) (*subInterpreter, error) {
+func initSubInterpreter(legacyMode bool, logger *service.Logger) (*subInterpreter, error) {
 	// Some of these args are required if we want to use Numpy, etc.
 	var ts py.PyThreadStatePtr
 	interpreterConfig := py.PyInterpreterConfig{}
-	interpreterConfig.Gil = py.OwnGil                // OwnGil works in 3.12, but is hard to use.
-	interpreterConfig.CheckMultiInterpExtensions = 1 // Numpy uses "legacy" extensions.
-	interpreterConfig.UseMainObMalloc = 0            // This must be 1 if using "legacy" extensions.
-	interpreterConfig.AllowThreads = 1               // Allow using threading library.
-	interpreterConfig.AllowDaemonThreads = 0         // Don't allow daemon threads for now.
+
+	if !legacyMode {
+		interpreterConfig.Gil = py.OwnGil
+		interpreterConfig.CheckMultiInterpExtensions = 1
+		interpreterConfig.UseMainObMalloc = 0
+		interpreterConfig.AllowThreads = 1       // Allow using threading library.
+		interpreterConfig.AllowDaemonThreads = 0 // Don't allow daemon threads for now.
+	} else {
+		interpreterConfig.Gil = py.SharedGil
+		interpreterConfig.CheckMultiInterpExtensions = 0 // Numpy uses "legacy" extensions.
+		interpreterConfig.UseMainObMalloc = 1            // This must be 1 if using "legacy" extensions.
+		interpreterConfig.AllowThreads = 1               // Allow using threading library.
+		interpreterConfig.AllowDaemonThreads = 0         // Don't allow daemon threads for now.
+	}
 
 	// Cross your fingers. This has potential for a fatal (panic) exit.
 	status := py.Py_NewInterpreterFromConfig(&ts, &interpreterConfig)
@@ -336,6 +355,8 @@ func initSubInterpreter(logger *service.Logger) (*subInterpreter, error) {
 	state := py.PyInterpreterState_Get()
 	id := py.PyInterpreterState_GetID(state)
 	py.PyEval_SaveThread()
+
+	logger.Tracef("initialized sub-interpreter %d\n", id)
 
 	return &subInterpreter{
 		state:  state,
