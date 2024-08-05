@@ -240,6 +240,9 @@ func (p *pythonProcessor) Process(_ context.Context, m *service.Message) (servic
 					if convertResult == py.NullPyObjectPtr {
 						err = errors.New("failed to JSON-ify root")
 					} else {
+						// Not needed any longer.
+						py.Py_DecRef(convertResult)
+
 						// The "result" should now be JSON as utf8 bytes.
 						resultBytes := py.PyDict_GetItemString(locals, "result")
 						if resultBytes == py.NullPyObjectPtr {
@@ -256,8 +259,6 @@ func (p *pythonProcessor) Process(_ context.Context, m *service.Message) (servic
 
 							batch = []*service.Message{m}
 						}
-						// Not needed any longer.
-						py.Py_DecRef(convertResult)
 					}
 				}
 				py.Py_DecRef(result)
