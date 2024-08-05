@@ -4,10 +4,10 @@ import (
 	"context"
 	"errors"
 	"github.com/voutilad/rp-connect-python/internal/impl/python"
+	"golang.org/x/sys/unix"
 	"runtime"
 	"sync"
 	"sync/atomic"
-	"time"
 	"unsafe"
 
 	"github.com/redpanda-data/benthos/v4/public/service"
@@ -17,16 +17,22 @@ import (
 
 var processorCnt atomic.Int32
 
+type interpreter struct {
+	state         py.PyInterpreterStatePtr
+	thread        py.PyThreadStatePtr
+	code          py.PyCodeObjectPtr
+	globalsHelper py.PyCodeObjectPtr
+	jsonHelper    py.PyCodeObjectPtr
+	lastTid       int
+}
+
 type pythonProcessor struct {
-	logger           *service.Logger
-	exe              string
-	closed           atomic.Bool
-	interpreterState py.PyInterpreterStatePtr
-	threadState      py.PyThreadStatePtr
-	mtx              sync.Mutex
-	code             py.PyCodeObjectPtr
-	globalsHelper    py.PyCodeObjectPtr
-	jsonHelper       py.PyCodeObjectPtr
+	logger       *service.Logger
+	exe          string
+	closed       atomic.Bool
+	mtx          sync.Mutex
+	interpreters []interpreter
+	tickets      chan int
 }
 
 var pythonExe = ""
@@ -84,6 +90,8 @@ func init() {
 // This will create and initialize a new sub-interpreter from the main Python
 // Go routine and precompile some Python code objects.
 func constructor(conf *service.ParsedConfig, mgr *service.Resources) (service.Processor, error) {
+	logger := mgr.Logger()
+
 	// Extract our configuration.
 	exe, err := conf.FieldString("exe")
 	if err != nil {
@@ -94,8 +102,10 @@ func constructor(conf *service.ParsedConfig, mgr *service.Resources) (service.Pr
 		return nil, err
 	}
 
+	// TODO: move collision detection into runtime.
 	// Look up or create a Runtime.
 	pythonMtx.Lock()
+	defer pythonMtx.Unlock()
 	if pythonExe == "" {
 		r, err := python.New(exe)
 		if err != nil {
@@ -104,69 +114,78 @@ func constructor(conf *service.ParsedConfig, mgr *service.Resources) (service.Pr
 		pythonRuntime = r
 		pythonExe = exe
 	} else if pythonExe != exe {
-		pythonMtx.Unlock()
 		return nil, errors.New("multiple python processors must use the same exe")
 	}
-	pythonMtx.Unlock()
-
-	// We'll give ourselves 10 seconds to initialize.
-	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(time.Second*10))
-	defer cancel()
 
 	// Start the runtime.
-	err = pythonRuntime.Start(ctx, mgr.Logger())
+	err = pythonRuntime.Start(context.Background(), mgr.Logger())
 	if err != nil {
 		return nil, err
 	}
 
-	// Start a sub-interpreter.
-	interpreterState, err := pythonRuntime.Spawn(ctx)
-	if err != nil {
-		return nil, err
+	// Start a few sub-interpreters.
+	num := runtime.NumCPU()
+	interpreters := make([]interpreter, num)
+	tickets := make(chan int, num)
+
+	for i := 0; i < len(interpreters); i++ {
+		// Start a sub-interpreter.
+		interpreterState, threadState, err := pythonRuntime.Spawn(context.Background())
+		if err != nil {
+			return nil, err
+		}
+		// We're about to use the sub-interpreter, so lock our Go routine to a thread.
+		runtime.LockOSThread()
+
+		// Load our thread state that was just created.
+		py.PyThreadState_Swap(threadState)
+
+		// Pre-compile our script and helpers.
+		code := py.Py_CompileString(script, "rp_connect_python.py", py.PyFileInput)
+		if code == py.NullPyCodeObjectPtr {
+			py.PyErr_Print()
+			return nil, errors.New("failed to compile python script")
+		}
+
+		// Pre-compile our script and helpers.
+		globalsHelper := py.Py_CompileString(globalHelperSrc, "__globals_helper__.py", py.PyFileInput)
+		if globalsHelper == py.NullPyCodeObjectPtr {
+			py.PyErr_Print()
+			return nil, errors.New("failed to compile python globals helper script")
+		}
+
+		// Pre-compile our script and helpers.
+		jsonHelper := py.Py_CompileString(jsonHelperSrc, "__json_helper__.py", py.PyFileInput)
+		if jsonHelper == py.NullPyCodeObjectPtr {
+			py.PyErr_Print()
+			return nil, errors.New("failed to compile python JSON helper script")
+		}
+
+		// XXX This is not good and will be global across all runtimes.
+		processorCnt.Add(1)
+
+		interpreters[i] = interpreter{
+			state:         interpreterState,
+			thread:        threadState,
+			code:          code,
+			globalsHelper: globalsHelper,
+			jsonHelper:    jsonHelper,
+			lastTid:       unix.Gettid(),
+		}
+		tickets <- i
+
+		// Release thread lock.
+		py.PyEval_SaveThread()
+		runtime.UnlockOSThread()
 	}
 
-	// We're about to use the sub-interpreter, so lock our Go routine to a thread.
-	runtime.LockOSThread()
-	defer runtime.UnlockOSThread()
-
-	// Create a new ThreadState.
-	threadState := py.PyThreadState_New(interpreterState)
-	py.PyEval_RestoreThread(threadState)
-
-	// Pre-compile our script and helpers.
-	code := py.Py_CompileString(script, "rp_connect_python.py", py.PyFileInput)
-	if code == py.NullPyCodeObjectPtr {
-		py.PyErr_Print()
-		return nil, errors.New("failed to compile python script")
-	}
-
-	// Pre-compile our script and helpers.
-	globalsHelper := py.Py_CompileString(globalHelperSrc, "__globals_helper__.py", py.PyFileInput)
-	if globalsHelper == py.NullPyCodeObjectPtr {
-		py.PyErr_Print()
-		return nil, errors.New("failed to compile python globals helper script")
-	}
-
-	// Pre-compile our script and helpers.
-	jsonHelper := py.Py_CompileString(jsonHelperSrc, "__json_helper__.py", py.PyFileInput)
-	if jsonHelper == py.NullPyCodeObjectPtr {
-		py.PyErr_Print()
-		return nil, errors.New("failed to compile python JSON helper script")
-	}
-
-	// XXX This is not good and will be global across all runtimes.
-	processorCnt.Add(1)
-
-	py.PyEval_SaveThread()
+	logger.Infof("spawned %d sub-interpreters", len(interpreters))
 
 	return &pythonProcessor{
-		logger:           mgr.Logger(),
-		exe:              exe,
-		interpreterState: interpreterState,
-		threadState:      threadState,
-		code:             code,
-		globalsHelper:    globalsHelper,
-		jsonHelper:       jsonHelper,
+		logger:       logger,
+		exe:          exe,
+		interpreters: interpreters,
+		tickets:      tickets,
 	}, nil
 }
 
@@ -174,25 +193,31 @@ func constructor(conf *service.ParsedConfig, mgr *service.Resources) (service.Pr
 func (p *pythonProcessor) Process(_ context.Context, m *service.Message) (service.MessageBatch, error) {
 	var err error = nil
 	var batch []*service.Message
+	var i interpreter
 
-	p.mtx.Lock()
-	defer p.mtx.Unlock()
+	select {
+	case idx := <-p.tickets:
+		i = p.interpreters[idx]
+		defer func() { p.tickets <- idx }()
+	default:
+		p.logger.Warn("can't get a ticket?!")
+		return batch, nil
+	}
 
 	// We need to lock our OS thread so Go won't screw us.
 	runtime.LockOSThread()
-
-	py.PyEval_RestoreThread(p.threadState)
+	py.PyEval_RestoreThread(i.thread)
 
 	// We need to set up some bindings so the script can actually _do_ something with our message.
 	// For now, we'll use a bit of a hack to create a `content()` function.
-	globals := py.PyDict_New() // xxx can we save this between runs? There must be a way.
+	globals := py.PyDict_New()
 	locals := py.PyDict_New()
 
 	empty := py.PyDict_New()
 	py.PyDict_SetItemString(locals, "root", empty)
 	py.Py_DecRef(empty)
 
-	if py.PyEval_EvalCode(p.globalsHelper, globals, locals) == py.NullPyObjectPtr {
+	if py.PyEval_EvalCode(i.globalsHelper, globals, locals) == py.NullPyObjectPtr {
 		p.logger.Warn("something failed preparing content()!!!")
 	} else {
 		var data []byte
@@ -207,7 +232,7 @@ func (p *pythonProcessor) Process(_ context.Context, m *service.Message) (servic
 				_ = py.PyDict_SetItemString(globals, "__content__", bytes)
 				py.Py_DecRef(bytes)
 				// xxx check return value
-				result := py.PyEval_EvalCode(p.code, globals, locals)
+				result := py.PyEval_EvalCode(i.code, globals, locals)
 				if result == py.NullPyObjectPtr {
 					py.PyErr_Print()
 					err = errors.New("problem executing Python script")
@@ -236,7 +261,7 @@ func (p *pythonProcessor) Process(_ context.Context, m *service.Message) (servic
 					fallthrough
 				case py.Dict:
 					// Convert to JSON for now with Python's help ;) because YOLO
-					convertResult := py.PyEval_EvalCode(p.jsonHelper, globals, locals)
+					convertResult := py.PyEval_EvalCode(i.jsonHelper, globals, locals)
 					if convertResult == py.NullPyObjectPtr {
 						err = errors.New("failed to JSON-ify root")
 					} else {
@@ -286,23 +311,8 @@ func (p *pythonProcessor) Close(ctx context.Context) error {
 		return nil
 	}
 
-	p.mtx.Lock()
-	runtime.LockOSThread()
-	// Restore our thread state so we can clean things.
-	py.PyEval_RestoreThread(p.threadState)
-
-	// Clean-up code objects.
-	py.Py_DecRef(py.PyObjectPtr(p.code))
-	py.Py_DecRef(py.PyObjectPtr(p.globalsHelper))
-	py.Py_DecRef(py.PyObjectPtr(p.jsonHelper))
-
-	// Clean up our thread state.
-	py.PyThreadState_Clear(p.threadState)
-	py.PyThreadState_DeleteCurrent()
-	runtime.UnlockOSThread()
-	p.mtx.Unlock()
-
 	if processorCnt.Add(-1) == 0 {
+
 		// Look up or create a Runtime.
 		pythonMtx.Lock()
 		r := pythonRuntime

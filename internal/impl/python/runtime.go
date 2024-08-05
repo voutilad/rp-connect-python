@@ -24,15 +24,15 @@ const (
 
 // Reply from the Python runtime Go routine in response to a Request.
 type reply struct {
-	err   error
-	state py.PyInterpreterStatePtr
+	err         error
+	interpreter subInterpreter
 }
 
 // State related to a Python Sub-interpreter.
 type subInterpreter struct {
-	originalTs py.PyThreadStatePtr      // Original Python ThreadState.
-	state      py.PyInterpreterStatePtr // Interpreter State.
-	id         int64                    // Unique identifier.
+	state  py.PyInterpreterStatePtr // Interpreter State.
+	thread py.PyThreadStatePtr      // Original Python ThreadState.
+	id     int64                    // Unique identifier.
 }
 
 type Runtime struct {
@@ -121,25 +121,21 @@ func (r *Runtime) Stop(ctx context.Context) error {
 }
 
 // Spawn a new sub-interpreter from the Runtime.
-func (r *Runtime) Spawn(ctx context.Context) (py.PyInterpreterStatePtr, error) {
-	state := py.NullInterpreterState
-	var err error = nil
-
+func (r *Runtime) Spawn(ctx context.Context) (py.PyInterpreterStatePtr, py.PyThreadStatePtr, error) {
 	// Tell it to spawn a new sub-interpreter.
 	r.mtx.Lock()
 	defer r.mtx.Unlock()
 	r.to <- pythonSpawn
 	select {
-	case reply := <-r.from:
-		if reply.err != nil {
-			err = reply.err
+	case rep := <-r.from:
+		if rep.err != nil {
+			return py.NullInterpreterState, py.NullThreadState, rep.err
 		} else {
-			state = reply.state
+			return rep.interpreter.state, rep.interpreter.thread, nil
 		}
 	case <-ctx.Done():
-		err = errors.New("interrupted")
+		return py.NullInterpreterState, py.NullThreadState, errors.New("interrupted")
 	}
-	return state, err
 }
 
 // Teardown a Sub-Interpreter and delete its state. This will probably trigger a lot of Python
@@ -151,8 +147,8 @@ func stopSubInterpreter(s subInterpreter, logger *service.Logger) {
 
 	// We should be running from the main Go routine. Load the original
 	// Python ThreadState so we can clean up.
-	py.PyEval_RestoreThread(s.originalTs)
-	py.PyThreadState_Clear(s.originalTs)
+	py.PyEval_RestoreThread(s.thread)
+	py.PyThreadState_Clear(s.thread)
 
 	// Clean up the ThreadState. Clear *must* be called before Delete.
 	py.PyInterpreterState_Clear(s.state)
@@ -235,7 +231,7 @@ func (r *Runtime) mainPython(logger *service.Logger) {
 				} else {
 					logger.Debugf("spawned sub-interpreter %d\n", sub.id)
 					subInterpreters = append(subInterpreters, *sub)
-					r.from <- reply{state: sub.state}
+					r.from <- reply{interpreter: *sub}
 				}
 			} else {
 				logger.Warn("main interpreter not running")
@@ -320,16 +316,16 @@ func initPython(exe, home string, paths []string) (py.PyThreadStatePtr, error) {
 // manages the runtime. Will potentially panic otherwise.
 func initSubInterpreter(logger *service.Logger) (*subInterpreter, error) {
 	// Some of these args are required if we want to use Numpy, etc.
-	var subStatePtr py.PyThreadStatePtr
+	var ts py.PyThreadStatePtr
 	interpreterConfig := py.PyInterpreterConfig{}
 	interpreterConfig.Gil = py.OwnGil                // OwnGil works in 3.12, but is hard to use.
-	interpreterConfig.CheckMultiInterpExtensions = 0 // Numpy uses "legacy" extensions.
-	interpreterConfig.UseMainObMalloc = 1            // This must be 1 if using "legacy" extensions.
+	interpreterConfig.CheckMultiInterpExtensions = 1 // Numpy uses "legacy" extensions.
+	interpreterConfig.UseMainObMalloc = 0            // This must be 1 if using "legacy" extensions.
 	interpreterConfig.AllowThreads = 1               // Allow using threading library.
 	interpreterConfig.AllowDaemonThreads = 0         // Don't allow daemon threads for now.
 
 	// Cross your fingers. This has potential for a fatal (panic) exit.
-	status := py.Py_NewInterpreterFromConfig(&subStatePtr, &interpreterConfig)
+	status := py.Py_NewInterpreterFromConfig(&ts, &interpreterConfig)
 	if status.Type != 0 {
 		errMsg := py.PyBytesToString(status.ErrMsg)
 		logger.Errorf("failed to create new sub-interpreter: %s", errMsg)
@@ -339,11 +335,11 @@ func initSubInterpreter(logger *service.Logger) (*subInterpreter, error) {
 	// Collect our information and drop the GIL.
 	state := py.PyInterpreterState_Get()
 	id := py.PyInterpreterState_GetID(state)
-	ts := py.PyEval_SaveThread()
+	py.PyEval_SaveThread()
 
 	return &subInterpreter{
-		originalTs: ts,
-		state:      state,
-		id:         id,
+		state:  state,
+		thread: ts,
+		id:     id,
 	}, nil
 }
