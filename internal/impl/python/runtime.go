@@ -268,8 +268,8 @@ func loadPython(exe string) error {
 	py.PyPreConfig_InitIsolatedConfig(&preConfig)
 	status := py.Py_PreInitialize(&preConfig)
 	if status.Type != 0 {
-		errMsg := py.PyBytesToString(status.ErrMsg)
-		return errors.New(errMsg)
+		msg, _ := py.WCharToString(status.ErrMsg)
+		return errors.New(msg)
 	}
 	return nil
 }
@@ -300,19 +300,19 @@ func initPython(exe, home string, paths []string) (py.PyThreadStatePtr, error) {
 	// dance with some helper functions.
 	status := py.PyConfig_SetBytesString(&pyConfig, &pyConfig.Home, home)
 	if status.Type != 0 {
-		errMsg := py.PyBytesToString(status.ErrMsg)
-		return py.NullThreadState, errors.New(errMsg)
+		msg, _ := py.WCharToString(status.ErrMsg)
+		return py.NullThreadState, errors.New(msg)
 	}
 	path := strings.Join(paths, ":") // xxx ';' on windows
 	status = py.PyConfig_SetBytesString(&pyConfig, &pyConfig.PythonPathEnv, path)
 	if status.Type != 0 {
-		errMsg := py.PyBytesToString(status.ErrMsg)
-		return py.NullThreadState, errors.New(errMsg)
+		msg, _ := py.WCharToString(status.ErrMsg)
+		return py.NullThreadState, errors.New(msg)
 	}
 	status = py.Py_InitializeFromConfig(&pyConfig)
 	if status.Type != 0 {
-		errMsg := py.PyBytesToString(status.ErrMsg)
-		return py.NullThreadState, errors.New(errMsg)
+		msg, _ := py.WCharToString(status.ErrMsg)
+		return py.NullThreadState, errors.New(msg)
 	}
 
 	// If we made it here, the main interpreter is started.
@@ -346,9 +346,9 @@ func initSubInterpreter(legacyMode bool, logger *service.Logger) (*subInterprete
 	// Cross your fingers. This has potential for a fatal (panic) exit.
 	status := py.Py_NewInterpreterFromConfig(&ts, &interpreterConfig)
 	if status.Type != 0 {
-		errMsg := py.PyBytesToString(status.ErrMsg)
-		logger.Errorf("Failed to create new sub-interpreter: %s", errMsg)
-		return nil, errors.New(errMsg)
+		msg, _ := py.WCharToString(status.ErrMsg)
+		logger.Errorf("Failed to create new sub-interpreter: %s", msg)
+		return nil, errors.New(msg)
 	}
 
 	// Collect our information and drop the GIL.

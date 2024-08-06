@@ -251,7 +251,7 @@ func (p *pythonProcessor) Process(_ context.Context, m *service.Message) (servic
 
 				// XXX Gives us a borrowed reference to the item.
 				root := py.PyDict_GetItemString(locals, "root")
-				switch py.Py_BaseType(root) {
+				switch py.BaseType(root) {
 				case py.None:
 					// Drop the message.
 					p.logger.Trace("Received Python None. Dropping message.")
@@ -265,9 +265,21 @@ func (p *pythonProcessor) Process(_ context.Context, m *service.Message) (servic
 					p.logger.Warn("Cannot serialize Python set.")
 					batch = []*service.Message{}
 				case py.Long:
-					fallthrough
+					long := py.PyLong_AsLong(root)
+					m.SetStructured(long)
+					batch = []*service.Message{m}
 				case py.String:
-					fallthrough
+					var str string
+					str, err = py.UnicodeToString(root)
+					if err != nil {
+						p.logger.Warn("Unable to decode Python string")
+						batch = []*service.Message{}
+					} else {
+						// We use SetBytes instead of SetStructured to avoid
+						// having our string wrapped in double-quotes.
+						m.SetBytes([]byte(str))
+						batch = []*service.Message{m}
+					}
 				case py.Tuple:
 					fallthrough
 				case py.List:
