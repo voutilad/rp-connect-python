@@ -197,7 +197,7 @@ func (r *Runtime) mainPython(logger *service.Logger) {
 			fallthrough
 		case pythonStart:
 			if !pythonStarted {
-				logger.Info("Starting python interpreter")
+				logger.Info("Starting python interpreter.")
 				var err error
 				mainThreadState, err = initPythonOnce()
 				if err != nil {
@@ -233,23 +233,23 @@ func (r *Runtime) mainPython(logger *service.Logger) {
 
 		case pythonSpawn:
 			if pythonStarted {
-				logger.Trace("spawning a new sub-interpreter")
+				logger.Trace("Spawning a new sub-interpreter.")
 				sub, err := initSubInterpreter(r.legacyMode, logger)
 				if err != nil {
 					keepGoing = false
-					logger.Warn("failed to create sub-interpreter")
+					logger.Warn("Failed to create sub-interpreter.")
 					r.from <- reply{err: err}
 				} else {
 					subInterpreters = append(subInterpreters, *sub)
 					r.from <- reply{interpreter: *sub}
 				}
 			} else {
-				logger.Warn("main interpreter not running")
+				logger.Warn("Main interpreter not running.")
 				r.from <- reply{err: errors.New("main interpreter not running")}
 			}
 
 		case pythonStatus:
-			logger.Debug("main interpreter Go routine is alive")
+			logger.Debug("Main interpreter Go routine is alive.")
 			r.from <- reply{}
 		}
 	}
@@ -347,7 +347,7 @@ func initSubInterpreter(legacyMode bool, logger *service.Logger) (*subInterprete
 	status := py.Py_NewInterpreterFromConfig(&ts, &interpreterConfig)
 	if status.Type != 0 {
 		errMsg := py.PyBytesToString(status.ErrMsg)
-		logger.Errorf("failed to create new sub-interpreter: %s", errMsg)
+		logger.Errorf("Failed to create new sub-interpreter: %s", errMsg)
 		return nil, errors.New(errMsg)
 	}
 
@@ -356,7 +356,7 @@ func initSubInterpreter(legacyMode bool, logger *service.Logger) (*subInterprete
 	id := py.PyInterpreterState_GetID(state)
 	py.PyEval_SaveThread()
 
-	logger.Tracef("initialized sub-interpreter %d\n", id)
+	logger.Tracef("Initialized sub-interpreter %d.\n", id)
 
 	return &subInterpreter{
 		state:  state,

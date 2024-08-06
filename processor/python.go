@@ -254,17 +254,19 @@ func (p *pythonProcessor) Process(_ context.Context, m *service.Message) (servic
 				switch py.Py_BaseType(root) {
 				case py.None:
 					// Drop the message.
-					p.logger.Trace("dropping message")
+					p.logger.Trace("Received Python None. Dropping message.")
 					batch = []*service.Message{}
 				case py.Unknown:
 					// The script is bad. Fail hard and fast to let the operator know.
 					py.PyErr_Print()
 					err = errors.New("'root' not found in Python script")
+				case py.Set:
+					// We can't serialize Sets to JSON. Warn and drop.
+					p.logger.Warn("Cannot serialize Python set.")
+					batch = []*service.Message{}
 				case py.Long:
-
 					fallthrough
 				case py.String:
-					// todo: we can handle this :)
 					fallthrough
 				case py.Tuple:
 					fallthrough
