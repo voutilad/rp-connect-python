@@ -104,7 +104,7 @@ func constructor(conf *service.ParsedConfig, mgr *service.Resources) (service.Pr
 	if err != nil {
 		return nil, err
 	}
-	legacy_mode, err := conf.FieldBool("legacy_mode")
+	legacyMode, err := conf.FieldBool("legacy_mode")
 	if err != nil {
 		return nil, err
 	}
@@ -125,14 +125,14 @@ func constructor(conf *service.ParsedConfig, mgr *service.Resources) (service.Pr
 	}
 
 	// Start the runtime.
-	err = pythonRuntime.Start(context.Background(), mgr.Logger(), legacy_mode)
+	err = pythonRuntime.Start(context.Background(), mgr.Logger(), legacyMode)
 	if err != nil {
 		return nil, err
 	}
 
 	// Start a few sub-interpreters.
 	var num = runtime.NumCPU()
-	if legacy_mode {
+	if legacyMode {
 		logger.Info("Running in legacy mode")
 		// num = 1
 	}
@@ -235,7 +235,7 @@ func (p *pythonProcessor) Process(_ context.Context, m *service.Message) (servic
 		data, err = m.AsBytes()
 		if err == nil {
 			// Will copy the underlying data into a new PyObject.
-			bytes := py.PyBytes_FromStringAndSize(unsafe.SliceData(data), len(data))
+			bytes := py.PyBytes_FromStringAndSize(unsafe.SliceData(data), int64(len(data)))
 
 			if bytes == py.NullPyObjectPtr {
 				err = errors.New("failed to create Python bytes")
@@ -261,7 +261,7 @@ func (p *pythonProcessor) Process(_ context.Context, m *service.Message) (servic
 					py.PyErr_Print()
 					err = errors.New("'root' not found in Python script")
 				case py.Long:
-					// todo: we can handle this :)
+
 					fallthrough
 				case py.String:
 					// todo: we can handle this :)

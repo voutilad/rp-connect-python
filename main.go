@@ -2,8 +2,6 @@ package main
 
 import (
 	"context"
-	// "runtime/pprof"
-
 	"github.com/redpanda-data/benthos/v4/public/service"
 	_ "github.com/redpanda-data/connect/public/bundle/free/v4"
 	_ "github.com/voutilad/rp-connect-python/processor"
