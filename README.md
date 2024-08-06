@@ -23,7 +23,7 @@ output:
 
 ```
 $ echo My voice is my passport | ./rp-connect-python run --log.level=off rot13.yaml 
-"Zl ibvpr vf zl cnffcbeg"
+Zl ibvpr vf zl cnffcbeg
 ```
 
 Currently, the sub-interpreter that runs your code provides two hooks back into
