@@ -4,9 +4,7 @@ import (
 	"context"
 	"errors"
 	"github.com/voutilad/rp-connect-python/internal/impl/python"
-	"golang.org/x/sys/unix"
 	"runtime"
-	"sync"
 	"sync/atomic"
 	"unsafe"
 
@@ -15,29 +13,18 @@ import (
 	py "github.com/voutilad/gogopython"
 )
 
-var processorCnt atomic.Int32
+type pythonProcessor struct {
+	logger       *service.Logger
+	runtime      python.Runtime
+	interpreters map[int64]interpreter
+	alive        atomic.Int32
+}
 
 type interpreter struct {
-	state         py.PyInterpreterStatePtr
-	thread        py.PyThreadStatePtr
 	code          py.PyCodeObjectPtr
 	globalsHelper py.PyCodeObjectPtr
 	jsonHelper    py.PyCodeObjectPtr
-	lastTid       int
 }
-
-type pythonProcessor struct {
-	logger       *service.Logger
-	exe          string
-	closed       atomic.Bool
-	mtx          sync.Mutex
-	interpreters []interpreter
-	tickets      chan int
-}
-
-var pythonExe = ""
-var pythonRuntime *python.Runtime
-var pythonMtx sync.Mutex
 
 // Python helper for initializing a `content` function, returning bytes from
 // the globals mapping.
@@ -66,9 +53,6 @@ except:
 // Python is not initialized here as it's too early to know details (e.g.
 // path to the executable).
 func init() {
-	// Initialize globals.
-	processorCnt.Store(0)
-
 	configSpec := service.
 		NewConfigSpec().
 		Summary("Process data with Python.").
@@ -108,116 +92,71 @@ func constructor(conf *service.ParsedConfig, mgr *service.Resources) (service.Pr
 	if err != nil {
 		return nil, err
 	}
+	cnt := runtime.NumCPU()
 
-	// TODO: move collision detection into runtime.
-	// Look up or create a Runtime.
-	pythonMtx.Lock()
-	defer pythonMtx.Unlock()
-	if pythonExe == "" {
-		r, err := python.New(exe)
-		if err != nil {
-			return nil, err
-		}
-		pythonRuntime = r
-		pythonExe = exe
-	} else if pythonExe != exe {
-		return nil, errors.New("multiple python processors must use the same exe")
-	}
-
-	// Start the runtime.
-	err = pythonRuntime.Start(context.Background(), mgr.Logger(), legacyMode)
+	// Spin up our runtime.
+	r, err := python.NewMultiInterpreterRuntime(exe, cnt, legacyMode, mgr.Logger())
 	if err != nil {
 		return nil, err
 	}
 
-	// Start a few sub-interpreters.
-	var num = runtime.NumCPU()
-	if legacyMode {
-		logger.Info("Running in legacy mode")
-		// num = 1
+	// Start the runtime now to ferret out errors.
+	err = r.Start()
+	if err != nil {
+		return nil, err
 	}
-	interpreters := make([]interpreter, num)
-	tickets := make(chan int, num)
 
-	for i := 0; i < len(interpreters); i++ {
-		// Start a sub-interpreter.
-		interpreterState, threadState, err := pythonRuntime.Spawn(context.Background())
-		if err != nil {
-			return nil, err
-		}
-		// We're about to use the sub-interpreter, so lock our Go routine to a thread.
-		runtime.LockOSThread()
-
-		// Load our thread state that was just created.
-		py.PyThreadState_Swap(threadState)
-
+	// Initialize our sub-interpreters.
+	interpreters := make(map[int64]interpreter)
+	err = r.Map(func(token python.InterpreterToken) error {
 		// Pre-compile our script and helpers.
 		code := py.Py_CompileString(script, "rp_connect_python.py", py.PyFileInput)
 		if code == py.NullPyCodeObjectPtr {
 			py.PyErr_Print()
-			return nil, errors.New("failed to compile python script")
+			return errors.New("failed to compile python script")
 		}
 
 		// Pre-compile our script and helpers.
 		globalsHelper := py.Py_CompileString(globalHelperSrc, "__globals_helper__.py", py.PyFileInput)
 		if globalsHelper == py.NullPyCodeObjectPtr {
 			py.PyErr_Print()
-			return nil, errors.New("failed to compile python globals helper script")
+			return errors.New("failed to compile python globals helper script")
 		}
 
 		// Pre-compile our script and helpers.
 		jsonHelper := py.Py_CompileString(jsonHelperSrc, "__json_helper__.py", py.PyFileInput)
 		if jsonHelper == py.NullPyCodeObjectPtr {
 			py.PyErr_Print()
-			return nil, errors.New("failed to compile python JSON helper script")
+			return errors.New("failed to compile python JSON helper script")
 		}
 
-		// XXX This is not good and will be global across all runtimes.
-		processorCnt.Add(1)
-
-		interpreters[i] = interpreter{
-			state:         interpreterState,
-			thread:        threadState,
+		interpreters[token.Id()] = interpreter{
 			code:          code,
 			globalsHelper: globalsHelper,
 			jsonHelper:    jsonHelper,
-			lastTid:       unix.Gettid(),
 		}
-		tickets <- i
-
-		// Release thread lock.
-		py.PyEval_SaveThread()
-		runtime.UnlockOSThread()
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
 
-	logger.Infof("Spawned %d sub-interpreters", len(interpreters))
-
-	return &pythonProcessor{
-		logger:       logger,
-		exe:          exe,
-		interpreters: interpreters,
-		tickets:      tickets,
-	}, nil
+	alive := atomic.Int32{}
+	alive.Store(int32(cnt))
+	return &pythonProcessor{logger: logger, runtime: r, interpreters: interpreters, alive: alive}, nil
 }
 
 // Process a given Redpanda Connect service.Message using Python.
-func (p *pythonProcessor) Process(_ context.Context, m *service.Message) (service.MessageBatch, error) {
-	var err error = nil
+func (p *pythonProcessor) Process(ctx context.Context, m *service.Message) (service.MessageBatch, error) {
+	p.logger.Info("Process called.")
 	var batch []*service.Message
-	var i interpreter
 
-	select {
-	case idx := <-p.tickets:
-		i = p.interpreters[idx]
-		defer func() { p.tickets <- idx }()
-	default:
-		p.logger.Warn("can't get a ticket?!")
-		return batch, nil
+	// Acquire an interpreter.
+	token, err := p.runtime.Acquire(ctx)
+	if err != nil {
+		return nil, err
 	}
-
-	// We need to lock our OS thread so Go won't screw us.
-	runtime.LockOSThread()
-	py.PyEval_RestoreThread(i.thread)
+	i := p.interpreters[token.Id()]
 
 	// We need to set up some bindings so the script can actually _do_ something with our message.
 	// For now, we'll use a bit of a hack to create a `content()` function.
@@ -319,33 +258,17 @@ func (p *pythonProcessor) Process(_ context.Context, m *service.Message) (servic
 	py.Py_DecRef(globals)
 	py.Py_DecRef(locals)
 
-	// Ok for Go to do its thing again.
-	py.PyEval_SaveThread()
-	runtime.UnlockOSThread()
-
+	_ = p.runtime.Release(token)
 	return batch, err
 }
 
 // Close a processor.
 //
 // If we're the last Python Processor, ask the main Go routine to stop the runtime.
-func (p *pythonProcessor) Close(ctx context.Context) error {
-	// It seems Close may be called multiple times for a single processor.
-	// Guard against it.
-	if !p.closed.CompareAndSwap(false, true) {
-		return nil
-	}
-
-	if processorCnt.Add(-1) == 0 {
-
-		// Look up or create a Runtime.
-		pythonMtx.Lock()
-		r := pythonRuntime
-		pythonMtx.Unlock()
-		if r == nil {
-			return errors.New("runtime disappeared")
-		}
-		return r.Stop(ctx)
+func (p *pythonProcessor) Close(_ context.Context) error {
+	if p.alive.Add(-1) == 0 {
+		p.logger.Debug("Stopping all sub-interpreters.")
+		return p.runtime.Stop()
 	}
 
 	return nil
