@@ -145,3 +145,9 @@ may run best in `single` mode. This includes:
   in cases of `single` mode, earlier versions. Requires changes to
   `gogopython`.
 
+## License and Supportability
+Source code in this project is licensed under the Apache v2 license unless
+noted otherwise.
+
+This software is provided without warranty or support. It is not part of
+Redpanda Data's enterprise offering and not supported by Redpanda Data.
