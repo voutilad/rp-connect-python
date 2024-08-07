@@ -5,6 +5,7 @@ import (
 	"errors"
 	"github.com/voutilad/rp-connect-python/internal/impl/python"
 	"runtime"
+	"strings"
 	"sync/atomic"
 	"unsafe"
 
@@ -12,6 +13,28 @@ import (
 
 	py "github.com/voutilad/gogopython"
 )
+
+type mode string
+
+const (
+	MultiMode   mode = "multi"
+	SingleMode  mode = "single"
+	LegacyMode  mode = "legacy"
+	InvalidMode mode = "invalid"
+)
+
+func stringAsMode(s string) mode {
+	switch strings.ToLower(s) {
+	case string(MultiMode):
+		return MultiMode
+	case string(SingleMode):
+		return SingleMode
+	case string(LegacyMode):
+		return LegacyMode
+	default:
+		return InvalidMode
+	}
+}
 
 type pythonProcessor struct {
 	logger       *service.Logger
@@ -61,22 +84,24 @@ func init() {
 		Field(service.NewStringField("exe").
 			Description("Path to a Python executable.").
 			Default("python3")).
-		Field(service.NewBoolField("legacy_mode").
-			Description("Run in a less smp-friendly manner to support NumPy.").
-			Default(false))
+		Field(service.NewStringField("mode").
+			Description("Toggle different runtime modes: multi, single, and legacy.").
+			Default(string(MultiMode)))
 
-	err := service.RegisterProcessor("python", configSpec, constructor)
+	err := service.RegisterProcessor("python", configSpec, construct)
 	if err != nil {
 		// There's no way to fail initialization. We must panic. :(
 		panic(err)
 	}
 }
 
-// Construct a new Python processor instance.
+// construct a new Python processor instance.
 //
 // This will create and initialize a new sub-interpreter from the main Python
 // Go routine and precompile some Python code objects.
-func constructor(conf *service.ParsedConfig, mgr *service.Resources) (service.Processor, error) {
+func construct(conf *service.ParsedConfig, mgr *service.Resources) (service.Processor, error) {
+	var err error
+	var processor *pythonProcessor
 	logger := mgr.Logger()
 	ctx := context.Background()
 
@@ -89,28 +114,35 @@ func constructor(conf *service.ParsedConfig, mgr *service.Resources) (service.Pr
 	if err != nil {
 		return nil, err
 	}
-	legacyMode, err := conf.FieldBool("legacy_mode")
+	modeString, err := conf.FieldString("mode")
 	if err != nil {
 		return nil, err
 	}
-	cnt := runtime.NumCPU()
+	mode := stringAsMode(modeString)
 
 	// Spin up our runtime.
-	r, err := python.NewMultiInterpreterRuntime(exe, cnt, legacyMode, mgr.Logger())
-	//r, err := python.NewSingleInterpreterRuntime(exe, mgr.Logger())
+	switch mode {
+	case MultiMode:
+		processor, err = newMultiRuntimeProcessor(exe, logger)
+	case LegacyMode:
+		processor, err = newLegacyRuntimeProcessor(exe, logger)
+	case SingleMode:
+		processor, err = newSingleRuntimeProcessor(exe, logger)
+	default:
+		return nil, errors.New("invalid mode")
+	}
 	if err != nil {
 		return nil, err
 	}
 
 	// Start the runtime now to ferret out errors.
-	err = r.Start(ctx)
+	err = processor.runtime.Start(ctx)
 	if err != nil {
 		return nil, err
 	}
 
-	// Initialize our sub-interpreters.
-	interpreters := make(map[int64]interpreter)
-	err = r.Map(ctx, func(token *python.InterpreterToken) error {
+	// Initialize our sub-interpreter state.
+	err = processor.runtime.Map(ctx, func(token *python.InterpreterTicket) error {
 		// Pre-compile our script and helpers.
 		code := py.Py_CompileString(script, "rp_connect_python.py", py.PyFileInput)
 		if code == py.NullPyCodeObjectPtr {
@@ -132,20 +164,66 @@ func constructor(conf *service.ParsedConfig, mgr *service.Resources) (service.Pr
 			return errors.New("failed to compile python JSON helper script")
 		}
 
-		interpreters[token.Id()] = interpreter{
+		processor.interpreters[token.Id()] = interpreter{
 			code:          code,
 			globalsHelper: globalsHelper,
 			jsonHelper:    jsonHelper,
 		}
 		return nil
 	})
+
 	if err != nil {
 		return nil, err
 	}
 
-	alive := atomic.Int32{}
-	alive.Store(int32(cnt))
-	return &pythonProcessor{logger: logger, runtime: r, interpreters: interpreters, alive: alive}, nil
+	return processor, nil
+}
+
+func newMultiRuntimeProcessor(exe string, logger *service.Logger) (*pythonProcessor, error) {
+	cnt := runtime.NumCPU()
+	r, err := python.NewMultiInterpreterRuntime(exe, cnt, false, logger)
+	if err != nil {
+		return nil, err
+	}
+
+	p := pythonProcessor{
+		logger:       logger,
+		runtime:      r,
+		interpreters: make(map[int64]interpreter),
+	}
+	p.alive.Store(int32(cnt))
+	return &p, nil
+}
+
+func newLegacyRuntimeProcessor(exe string, logger *service.Logger) (*pythonProcessor, error) {
+	cnt := runtime.NumCPU()
+	r, err := python.NewMultiInterpreterRuntime(exe, cnt, true, logger)
+	if err != nil {
+		return nil, err
+	}
+
+	p := pythonProcessor{
+		logger:       logger,
+		runtime:      r,
+		interpreters: make(map[int64]interpreter),
+	}
+	p.alive.Store(int32(cnt))
+	return &p, nil
+}
+
+func newSingleRuntimeProcessor(exe string, logger *service.Logger) (*pythonProcessor, error) {
+	r, err := python.NewSingleInterpreterRuntime(exe, logger)
+	if err != nil {
+		return nil, err
+	}
+
+	p := pythonProcessor{
+		logger:       logger,
+		runtime:      r,
+		interpreters: make(map[int64]interpreter),
+	}
+	p.alive.Store(1)
+	return &p, nil
 }
 
 // Process a given Redpanda Connect service.Message using Python.

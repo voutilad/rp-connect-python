@@ -1,7 +1,7 @@
 package python
 
 import (
-	"github.com/pkg/errors"
+	"errors"
 	"github.com/redpanda-data/benthos/v4/public/service"
 	py "github.com/voutilad/gogopython"
 	"golang.org/x/net/context"
@@ -14,7 +14,6 @@ type state int
 const (
 	stopped state = iota
 	started
-	destroyed
 )
 
 type SingleInterpreterRuntime struct {
@@ -23,7 +22,7 @@ type SingleInterpreterRuntime struct {
 	paths   []string
 	mtxChan chan int
 	thread  py.PyThreadStatePtr
-	token   InterpreterToken
+	ticket  InterpreterTicket // SingleInterpreterRuntime uses a single ticket.
 	state   state
 	logger  *service.Logger
 }
@@ -40,32 +39,19 @@ func NewSingleInterpreterRuntime(exe string, logger *service.Logger) (*SingleInt
 		paths:   paths,
 		mtxChan: make(chan int, 1),
 		logger:  logger,
-		token: InterpreterToken{
+		ticket: InterpreterTicket{
 			id: -1,
 		},
 		state: stopped,
 	}, nil
 }
 
-func (r *SingleInterpreterRuntime) lock(ctx context.Context) error {
-	select {
-	case r.mtxChan <- 1:
-	case <-ctx.Done():
-		return ctx.Err()
-	}
-	return nil
-}
-
-func (r *SingleInterpreterRuntime) unlock() {
-	<-r.mtxChan
-}
-
 func (r *SingleInterpreterRuntime) Start(ctx context.Context) error {
-	err := r.lock(ctx)
+	err := globalMtx.LockWithContext(ctx)
 	if err != nil {
 		return err
 	}
-	defer r.unlock()
+	defer globalMtx.Unlock()
 
 	if r.state == started {
 		// Already running.
@@ -73,89 +59,98 @@ func (r *SingleInterpreterRuntime) Start(ctx context.Context) error {
 	}
 
 	// We can Start from a destroyed or stopped state as they are sort of the
-	// the same thing in this case since it's a single interpreter runtime.
+	// same thing in this case since it's a single interpreter runtime.
 
 	runtime.LockOSThread()
-	ts, err := initPython(r.exe, r.home, r.paths)
+	ts, err := loadPython(r.exe, r.home, r.paths)
 	runtime.UnlockOSThread()
 	if err != nil {
 		return err
 	}
 
 	r.thread = ts
-	r.token.cookie = uintptr(unsafe.Pointer(r))
+	r.ticket.cookie = uintptr(unsafe.Pointer(r))
 	r.state = started
 
 	return nil
 }
 
 func (r *SingleInterpreterRuntime) Stop(ctx context.Context) error {
-	err := r.lock(ctx)
+	err := globalMtx.LockWithContext(ctx)
 	if err != nil {
 		return err
 	}
-	defer r.unlock()
+	defer globalMtx.Unlock()
 
 	runtime.LockOSThread()
-	py.PyEval_RestoreThread(r.thread)
-	py.Py_FinalizeEx()
+	err = unloadPython(r.thread)
 	runtime.UnlockOSThread()
-	r.logger.Debug("Python main interpreter stopped.")
 
 	r.thread = py.NullThreadState
-	r.token.cookie = 0
+	r.ticket.cookie = 0
 	r.state = stopped
+
+	if err == nil {
+		r.logger.Debug("Python main interpreter stopped.")
+	} else {
+		r.logger.Warn("Failure while stopping interpreter. Runtime left in undefined state.")
+	}
 
 	return nil
 }
 
-func (r *SingleInterpreterRuntime) Acquire(ctx context.Context) (*InterpreterToken, error) {
-	err := r.lock(ctx)
+func (r *SingleInterpreterRuntime) Acquire(ctx context.Context) (*InterpreterTicket, error) {
+	err := globalMtx.LockWithContext(ctx)
 	if err != nil {
 		return nil, err
 	}
 
-	return &r.token, nil
+	return &r.ticket, nil
 }
 
-func (r *SingleInterpreterRuntime) Release(token *InterpreterToken) error {
-	if token.cookie != r.token.cookie {
-		return errors.New("bad token")
+func (r *SingleInterpreterRuntime) Release(ticket *InterpreterTicket) error {
+	if ticket.cookie != r.ticket.cookie {
+		return errors.New("invalid interpreter ticket")
 	}
 
-	r.unlock()
+	globalMtx.Unlock()
 	return nil
 }
 
-func (r *SingleInterpreterRuntime) Destroy(token *InterpreterToken) error {
-	err := r.lock(context.Background())
-	if err != nil {
-		return err
+func (r *SingleInterpreterRuntime) Apply(ticket *InterpreterTicket, _ context.Context, f func() error) error {
+	if ticket.cookie != r.ticket.cookie {
+		return errors.New("invalid interpreter ticket")
 	}
-	if token.cookie != r.token.cookie {
-		return errors.New("bad token")
-	}
-	defer r.unlock()
 
-	r.state = destroyed
-	return nil
+	// Pin our go routine & enter the context of the interpreter thread state.
+	runtime.LockOSThread()
+	py.PyEval_RestoreThread(r.thread)
+
+	err := f()
+
+	// Release our thread state and unpin thread.
+	py.PyEval_SaveThread()
+	runtime.UnlockOSThread()
+
+	return err
 }
 
-func (r *SingleInterpreterRuntime) Apply(token *InterpreterToken, ctx context.Context, f func() error) error {
-	err := r.lock(context.Background())
-	if err != nil {
-		return err
-	}
-	defer r.unlock()
-
-	return nil
-}
-
-func (r *SingleInterpreterRuntime) Map(ctx context.Context, f func(token *InterpreterToken) error) error {
+func (r *SingleInterpreterRuntime) Map(ctx context.Context, f func(token *InterpreterTicket) error) error {
 	token, err := r.Acquire(ctx)
 	if err != nil {
 		return nil
 	}
 
-	return r.Release(token)
+	// Pin our go routine & enter the context of the interpreter thread state.
+	runtime.LockOSThread()
+	py.PyEval_RestoreThread(r.thread)
+
+	err = f(token)
+
+	// Release our thread state and unpin thread.
+	py.PyEval_SaveThread()
+	runtime.UnlockOSThread()
+
+	_ = r.Release(token)
+	return err
 }
