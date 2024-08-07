@@ -1,6 +1,6 @@
 # Redpanda Connect + Python
 
-<div style="text-align: center;">
+<div align="center">
   <img src="./rpcn_and_python.jpg" width="45%" alt="A redpanda & a python sipping tea together as friends.">
 </div>
 
