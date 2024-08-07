@@ -1,6 +1,8 @@
 # Redpanda Connect + Python
 
-<img src="./rpcn_and_python.jpg" width="45%" alt="A redpanda & a python sipping tea together as friends." style="text-align: center;">
+<div style="text-align: center;">
+  <img src="./rpcn_and_python.jpg" width="45%" alt="A redpanda & a python sipping tea together as friends.">
+</div>
 
 Adds an embedded Python interpreter to Redpanda Connect, so you can
 do things write your transformation logic in pure Python:
