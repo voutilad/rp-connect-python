@@ -1,12 +1,13 @@
 package python
 
 import (
+	"context"
 	"errors"
-	"github.com/redpanda-data/benthos/v4/public/service"
-	py "github.com/voutilad/gogopython"
-	"golang.org/x/net/context"
 	"runtime"
 	"unsafe"
+
+	"github.com/redpanda-data/benthos/v4/public/service"
+	py "github.com/voutilad/gogopython"
 )
 
 type state int

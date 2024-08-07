@@ -3,8 +3,9 @@ package python
 import (
 	"context"
 	"errors"
-	py "github.com/voutilad/gogopython"
 	"strings"
+
+	py "github.com/voutilad/gogopython"
 )
 
 var globalMtx *ContextAwareMutex

@@ -1,13 +1,14 @@
 package python
 
 import (
+	"context"
 	"errors"
-	"github.com/redpanda-data/benthos/v4/public/service"
-	py "github.com/voutilad/gogopython"
-	"golang.org/x/net/context"
 	"runtime"
 	"sync"
 	"sync/atomic"
+
+	"github.com/redpanda-data/benthos/v4/public/service"
+	py "github.com/voutilad/gogopython"
 )
 
 // Request the Python runtime Go routine perform an action.

@@ -1,7 +1,7 @@
 package python
 
 import (
-	"golang.org/x/net/context"
+	"context"
 )
 
 type key int
