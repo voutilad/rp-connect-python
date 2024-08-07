@@ -137,8 +137,10 @@ may run best in `single` mode. This includes:
 
 ## Known Issues / Limitations
 - Tested on macOS/arm64 and Linux/{arm64,amd64}.
+  - Not expected to work on Windows. Requires `gogopython` updates.
 - You can only use one Python binary across all Python processors.
 - `pandas` sometimes has issues starting on arm64 machines.
 - Hardcoded still for Python 3.12. Should be portable to 3.13 and,
   in cases of `single` mode, earlier versions. Requires changes to
   `gogopython`.
+
