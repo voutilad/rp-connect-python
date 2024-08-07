@@ -1,4 +1,5 @@
 # Redpanda Connect + Python
+[![Build without CGO_ENABLED](https://github.com/voutilad/rp-connect-python/actions/workflows/build.yml/badge.svg?branch=main)](https://github.com/voutilad/rp-connect-python/actions/workflows/build.yml)
 
 <div align="center">
   <img src="./rpcn_and_python.jpg" width="45%" alt="A redpanda & a python sipping tea together as friends.">
