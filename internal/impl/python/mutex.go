@@ -2,7 +2,6 @@ package python
 
 import (
 	"golang.org/x/net/context"
-	"time"
 )
 
 type key int
@@ -32,8 +31,6 @@ func (c *ContextAwareMutex) LockWithContext(ctx context.Context) error {
 		return nil
 	case <-ctx.Done():
 		return ctx.Err()
-	case <-time.After(10 * time.Second):
-		panic("deadlock detected")
 	}
 }
 
