@@ -8,27 +8,44 @@ import (
 	py "github.com/voutilad/gogopython"
 )
 
+// globalMtx guards the global Python program logic as only a single Python
+// instance can be embedded into a process's address space.
 var globalMtx *ContextAwareMutex
+
+// pythonWasLoaded reports whether the Python dynamic libraries have already
+// been loaded into the process's address space.
 var pythonWasLoaded = false
+
+// pythonExe contains the unique executable name used for finding the
+// currently used Python implementation.
 var pythonExe = ""
+
+// pythonMain points to the thread-state of the main Python interpreter.
 var pythonMain py.PyThreadStatePtr
+
+// numRuntimes tracks the number of Runtime instances launched to identify if
+// one stopping should tear down the main Python interpreter.
 var numRuntimes = 0
-var multiRuntimeEnabled = false
 
 func init() {
 	globalMtx = NewContextAwareMutex()
 }
 
+// An InterpreterTicket represents ownership of the interpreter of a particular
+// Runtime. Other than its id, it's opaque to the user.
 type InterpreterTicket struct {
 	idx    int     // Index of interpreter (used by the Runtime implementation).
 	id     int64   // Python interpreter id.
 	cookie uintptr // Optional cookie value (used by the Runtime implementation).
 }
 
+// Id provides a unique (to the backing Runtime) identifier for an interpreter.
+// The caller may use this for identifying if they're re-using an interpreter.
 func (i *InterpreterTicket) Id() int64 {
 	return i.id
 }
 
+// A Runtime for a Python interpreter.
 type Runtime interface {
 	// Start the Python runtime.
 	Start(ctx context.Context) error
@@ -36,8 +53,9 @@ type Runtime interface {
 	// Stop the Python runtime, removing all interpreter state.
 	Stop(ctx context.Context) error
 
-	// Acquire ownership of an interpreter until Release is called.
-	Acquire(ctx context.Context) (token *InterpreterTicket, err error)
+	// Acquire ownership of an interpreter until Release is called, providing
+	// a ticket on success or returning err on error.
+	Acquire(ctx context.Context) (ticket *InterpreterTicket, err error)
 
 	// Release ownership of an interpreter identified by the given
 	// InterpreterTicket.
@@ -47,10 +65,10 @@ type Runtime interface {
 	// InterpreterTicket.
 	Apply(token *InterpreterTicket, ctx context.Context, f func() error) error
 
-	// Map a function f over the interpreter or interpreters.
+	// Map a function f over all possible interpreters.
 	// In the case of multiple interpreters, an error aborts mapping over the
-	// rest.
-	Map(ctx context.Context, f func(token *InterpreterTicket) error) error
+	// remainder.
+	Map(ctx context.Context, f func(ticket *InterpreterTicket) error) error
 }
 
 // Initialize the main Python interpreter or increment the global count if
@@ -58,6 +76,8 @@ type Runtime interface {
 //
 // Returns the Python main thread state on success.
 // On failure, returns a null PyThreadStatePtr and an error.
+//
+// Must be called globalMtx and the OS thread locked.
 func loadPython(exe, home string, paths []string) (py.PyThreadStatePtr, error) {
 	globalMtx.AssertLocked()
 

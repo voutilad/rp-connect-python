@@ -10,13 +10,6 @@ import (
 	py "github.com/voutilad/gogopython"
 )
 
-type state int
-
-const (
-	stopped state = iota
-	started
-)
-
 type SingleInterpreterRuntime struct {
 	exe     string
 	home    string
@@ -24,7 +17,7 @@ type SingleInterpreterRuntime struct {
 	mtxChan chan int
 	thread  py.PyThreadStatePtr
 	ticket  InterpreterTicket // SingleInterpreterRuntime uses a single ticket.
-	state   state
+	started bool
 	logger  *service.Logger
 }
 
@@ -43,7 +36,6 @@ func NewSingleInterpreterRuntime(exe string, logger *service.Logger) (*SingleInt
 		ticket: InterpreterTicket{
 			id: -1,
 		},
-		state: stopped,
 	}, nil
 }
 
@@ -54,13 +46,10 @@ func (r *SingleInterpreterRuntime) Start(ctx context.Context) error {
 	}
 	defer globalMtx.Unlock()
 
-	if r.state == started {
+	if r.started {
 		// Already running.
 		return nil
 	}
-
-	// We can Start from a destroyed or stopped state as they are sort of the
-	// same thing in this case since it's a single interpreter runtime.
 
 	runtime.LockOSThread()
 	ts, err := loadPython(r.exe, r.home, r.paths)
@@ -71,7 +60,7 @@ func (r *SingleInterpreterRuntime) Start(ctx context.Context) error {
 
 	r.thread = ts
 	r.ticket.cookie = uintptr(unsafe.Pointer(r))
-	r.state = started
+	r.started = true
 
 	return nil
 }
@@ -88,8 +77,8 @@ func (r *SingleInterpreterRuntime) Stop(ctx context.Context) error {
 	runtime.UnlockOSThread()
 
 	r.thread = py.NullThreadState
-	r.ticket.cookie = 0
-	r.state = stopped
+	r.ticket.cookie = 0 // NULL
+	r.started = false
 
 	if err == nil {
 		r.logger.Debug("Python main interpreter stopped.")
@@ -101,6 +90,8 @@ func (r *SingleInterpreterRuntime) Stop(ctx context.Context) error {
 }
 
 func (r *SingleInterpreterRuntime) Acquire(ctx context.Context) (*InterpreterTicket, error) {
+	// Since the SingleInterpreterRuntime uses the main interpreter, we need
+	// take the global lock.
 	err := globalMtx.LockWithContext(ctx)
 	if err != nil {
 		return nil, err
