@@ -133,6 +133,7 @@ func (r *MultiInterpreterRuntime) Stop(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	r.started = false
 
 	r.logger.Debug("Python interpreter stopped.")
 	return nil

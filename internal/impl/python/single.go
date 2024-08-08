@@ -10,6 +10,8 @@ import (
 	py "github.com/voutilad/gogopython"
 )
 
+// SingleInterpreterRuntime provides an implementation for using main
+// Python interpreter.
 type SingleInterpreterRuntime struct {
 	exe     string
 	home    string

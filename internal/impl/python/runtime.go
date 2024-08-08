@@ -3,18 +3,20 @@ package python
 import (
 	"context"
 	"errors"
-	"strings"
-
 	py "github.com/voutilad/gogopython"
+	"strings"
 )
 
 // globalMtx guards the global Python program logic as only a single Python
 // instance can be embedded into a process's address space.
 var globalMtx *ContextAwareMutex
 
-// pythonWasLoaded reports whether the Python dynamic libraries have already
+// pythonLoaded reports whether the Python dynamic libraries have already
 // been loaded into the process's address space.
-var pythonWasLoaded = false
+var pythonLoaded = false
+
+// pythonRunning reports whether the Python interpreter is available.
+var pythonRunning = false
 
 // pythonExe contains the unique executable name used for finding the
 // currently used Python implementation.
@@ -23,9 +25,9 @@ var pythonExe = ""
 // pythonMain points to the thread-state of the main Python interpreter.
 var pythonMain py.PyThreadStatePtr
 
-// numRuntimes tracks the number of Runtime instances launched to identify if
+// numCurrentRuntimes tracks the number of Runtime instances launched to identify if
 // one stopping should tear down the main Python interpreter.
-var numRuntimes = 0
+var numCurrentRuntimes = 0
 
 func init() {
 	globalMtx = NewContextAwareMutex()
@@ -83,17 +85,20 @@ func loadPython(exe, home string, paths []string) (py.PyThreadStatePtr, error) {
 
 	// It's ok if we're starting another instance of the same executable, but
 	// we don't want to re-load the libraries as we'll crash.
-	if exe != pythonExe && pythonWasLoaded {
+	if exe != pythonExe && pythonLoaded {
 		return py.NullThreadState, errors.New("python was already initialized")
-	} else if pythonWasLoaded {
-		numRuntimes++
+	} else if pythonLoaded && numCurrentRuntimes > 0 {
+		numCurrentRuntimes++
 		return pythonMain, nil
 	}
 
 	// Load our dynamic libraries.
-	err := py.Load_library(exe)
-	if err != nil {
-		return py.NullThreadState, err
+	if !pythonLoaded {
+		err := py.Load_library(exe)
+		if err != nil {
+			return py.NullThreadState, err
+		}
+		pythonLoaded = true
 	}
 
 	// Pre-configure the Python Interpreter. Not 100% necessary, but gives us
@@ -107,9 +112,9 @@ func loadPython(exe, home string, paths []string) (py.PyThreadStatePtr, error) {
 	}
 
 	// From now on, we're considered "loaded."
-	pythonWasLoaded = true
+	pythonLoaded = true
 	pythonExe = exe
-	numRuntimes++
+	numCurrentRuntimes++
 
 	// Configure our Paths. We need to approximate an isolated pyConfig from a
 	// regular config because Python will ignore our modifying some values if
@@ -152,13 +157,13 @@ func loadPython(exe, home string, paths []string) (py.PyThreadStatePtr, error) {
 func unloadPython(mainThread py.PyThreadStatePtr) error {
 	globalMtx.AssertLocked()
 
-	if !pythonWasLoaded || numRuntimes < 1 {
+	if !pythonLoaded || numCurrentRuntimes < 1 {
 		return errors.New("invalid runtime state")
 	}
 
-	numRuntimes--
+	numCurrentRuntimes--
 
-	if numRuntimes == 0 {
+	if numCurrentRuntimes == 0 {
 		py.PyEval_RestoreThread(mainThread)
 		if py.Py_FinalizeEx() != 0 {
 			return errors.New("failed to finalize Python runtime")
