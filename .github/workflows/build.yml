@@ -28,4 +28,4 @@ jobs:
       run: CGO_ENABLED=0 go build
 
     - name: Test
-      run: go test -v ./processor/... ./internal/..
+      run: go test -v ./processor /internal/...
