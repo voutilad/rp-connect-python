@@ -6,7 +6,7 @@
 </div>
 
 Adds an embedded Python interpreter to Redpanda Connect, so you can
-your transformation logic in pure Python:
+write your transformation logic in pure Python:
 
 ```yaml
 # rot13.yaml
