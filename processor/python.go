@@ -64,9 +64,9 @@ const jsonHelperSrc = `
 import json
 try:
 	if type(root) is str:
-		result = root.encode()
+		result = root
 	else:
-		result = json.dumps(root).encode()
+		result = json.dumps(root)
 except:
 	result = None
 `
@@ -89,39 +89,41 @@ func init() {
 			Default(string(MultiMode)))
 	// TODO: linting rules for configuration fields
 
-	err := service.RegisterProcessor("python", configSpec, construct)
+	err := service.RegisterProcessor("python", configSpec,
+		func(conf *service.ParsedConfig, mgr *service.Resources) (service.Processor, error) {
+			// Extract our configuration.
+			exe, err := conf.FieldString("exe")
+			if err != nil {
+				panic(err)
+			}
+			script, err := conf.FieldString("script")
+			if err != nil {
+				return nil, err
+			}
+			modeString, err := conf.FieldString("mode")
+			if err != nil {
+				return nil, err
+			}
+
+			return newPythonProcessor(exe, script, stringAsMode(modeString), mgr.Logger())
+		})
 	if err != nil {
 		// There's no way to fail initialization. We must panic. :(
 		panic(err)
 	}
 }
 
-// construct a new Python processor instance.
+// newPythonProcessor creates new Python processor instance with the provided
+// configuration.
 //
 // This will create and initialize a new sub-interpreter from the main Python
 // Go routine and precompile some Python code objects.
-func construct(conf *service.ParsedConfig, mgr *service.Resources) (service.Processor, error) {
+func newPythonProcessor(exe, script string, mode mode, logger *service.Logger) (service.Processor, error) {
 	var err error
-	var processor *pythonProcessor
-	logger := mgr.Logger()
 	ctx := context.Background()
 
-	// Extract our configuration.
-	exe, err := conf.FieldString("exe")
-	if err != nil {
-		panic(err)
-	}
-	script, err := conf.FieldString("script")
-	if err != nil {
-		return nil, err
-	}
-	modeString, err := conf.FieldString("mode")
-	if err != nil {
-		return nil, err
-	}
-	mode := stringAsMode(modeString)
-
 	// Spin up our runtime.
+	var processor *pythonProcessor
 	switch mode {
 	case MultiMode:
 		processor, err = newMultiRuntimeProcessor(exe, logger)
@@ -309,6 +311,13 @@ func (p *pythonProcessor) Process(ctx context.Context, m *service.Message) (serv
 				m.SetBytes([]byte(str))
 				batch = []*service.Message{m}
 			}
+		case py.Bytes:
+			// We need to copy-out the bytes into the message. We get a
+			// pointer to the underlying data managed by Python.
+			p := py.PyBytes_AsString(root)
+			sz := py.PyBytes_Size(root)
+			m.SetBytes(unsafe.Slice(p, sz))
+			batch = []*service.Message{m}
 		case py.Tuple:
 			fallthrough
 		case py.List:
