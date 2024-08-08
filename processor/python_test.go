@@ -21,7 +21,7 @@ func TestDifferentInterpreterModes(t *testing.T) {
 
 	for _, m := range []mode{MultiMode, LegacyMode, SingleMode} {
 		t.Run(string(m), func(t *testing.T) {
-			proc, err := newPythonProcessor("python3", script, SingleMode, nil)
+			proc, err := newPythonProcessor("python3", script, m, nil)
 			if err != nil {
 				t.Fatal(err)
 			}
