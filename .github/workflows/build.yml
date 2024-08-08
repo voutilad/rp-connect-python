@@ -10,6 +10,15 @@ jobs:
     steps:
     - uses: actions/checkout@v4
 
+    - name: Set up Python
+      uses: actions/setup-python@v5.1.1
+      with:
+        python-version: "3.12"
+        cache: pip
+
+    - name: Install Python setuptools
+      run: pip install setuptools
+
     - name: Set up Go
       uses: actions/setup-go@v5
       with:
@@ -18,3 +27,5 @@ jobs:
     - name: Build
       run: CGO_ENABLED=0 go build
 
+    - name: Test
+      run: go test -v ./processor/... ./internal/..
