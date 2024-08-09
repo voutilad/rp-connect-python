@@ -75,8 +75,8 @@ func init() {
 			Description("Path to a Python executable.").
 			Default("python3")).
 		Field(service.NewStringField("mode").
-			Description("Toggle different Python runtime modes: 'multi', 'single', and 'legacy'").
-			Default(string(MultiMode)))
+			Description("Toggle different Python runtime modes: 'multi', 'single', and 'legacy' (the default)").
+			Default(string(LegacyMode)))
 	// TODO: linting rules for configuration fields
 
 	err := service.RegisterProcessor("python", configSpec,
