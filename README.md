@@ -31,17 +31,18 @@ $ echo My voice is my passport | ./rp-connect-python run --log.level=off rot13.y
 Zl ibvpr vf zl cnffcbeg
 ```
 
-Currently, the sub-interpreter that runs your code provides two hooks back into
-Redpanda Connect:
+Currently, the (sub-)interpreter that runs your code provides two hooks back into
+Redpanda Connect, mimicking Bloblang behavior:
 
-- `content()` -- similar to the bloblang function, it returns the `bytes` of a message
-- `root` -- this is a `dict` in scope by default, so you can readily assign key/values,
-  or you can replace it with a new object like `root = "junk"`
+- `content()` -- similar to the Bloblang function, it returns the `bytes` of a message.
+- `root` -- this is a `dict`-like object in scope by default, so you can readily assign
+  key/values like a Python `dict` _or_ use Bloblang-like assignment by attribute
+  (e.g. `root.name.first = "Dave"`). Or...you can reassign it: `root = (1, 2)`.
 
 ## Requirements
 - Python 3.12
 - `setuptools` (makes it so much easier to find `libpython`, just `pip install` it.)
-- Go 1.20 or newer
+- Go 1.22 or newer
 
 ## Build
 Easy:
@@ -143,7 +144,7 @@ may run best in `single` mode. This includes:
 - `pandas` sometimes has issues starting on arm64 machines.
 - Hardcoded still for Python 3.12. Should be portable to 3.13 and,
   in cases of `single` mode, earlier versions. Requires changes to
-  `gogopython`.
+  `gogopython` I haven't made yet.
 
 ## License and Supportability
 Source code in this project is licensed under the Apache v2 license unless
