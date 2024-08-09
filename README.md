@@ -83,12 +83,12 @@ pipeline:
             msg = json.loads(data)["title"]
           except:
             msg = "nothing :("
-          root["msg"] = f"You said: '{msg}'"
-          root["at"] = time.ctime()
+          root.msg = f"You said: '{msg}'"
+          root.at = time.ctime()
           try:
-            root["ip"] = requests.get("https://api.ipify.org").text
+            root.ip = requests.get("https://api.ipify.org").text
           except:
-            root["ip"] = "no internet?"
+            root.ip = "no internet?"
 
 output:
   stdout: {}
@@ -96,13 +96,16 @@ output:
 
 To run the demo:
 
-```sh
-python3 -m venv venv
-. venv/bin/activate
-pip install requests setuptools
-deactivate
-./rp-connect-python run test.yaml
 ```
+$ python3 -m venv venv
+$ ./venv/bin/pip install --quiet -U pip setuptools requests
+$ ./rp-connect-python run --log.level=off examples/requests.yaml
+{"msg": "You said: 'this is a test'", "at": "Fri Aug  9 19:07:29 2024", "ip": "192.0.1.210"}
+{"msg": "You said: 'this is a test'", "at": "Fri Aug  9 19:07:30 2024", "ip": "192.0.1.210"}
+{"msg": "You said: 'this is a test'", "at": "Fri Aug  9 19:07:31 2024", "ip": "192.0.1.210"}
+```
+
+> No, that's not my actual ipv4 address.
 
 ## Interpreter Modes
 This processor now supports multiple interpreter modes that may be set
