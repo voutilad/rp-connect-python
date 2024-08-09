@@ -1,0 +1,29 @@
+input:
+  file:
+    paths: [ ./*.jpg ]
+    scanner:
+      to_the_end: {}
+
+pipeline:
+  processors:
+    - python:
+        exe: ./venv/bin/python3
+        mode: single
+        script: |
+          from PIL import Image
+          from io import BytesIO
+
+          infile = BytesIO(content())
+          try:
+            with Image.open(infile) as im:
+              root.format = im.format
+              root.size = im.size
+              root.mode = im.mode
+          except OSError:
+            pass
+    - mapping: |
+        root = this
+        root.path = metadata("path")
+
+output:
+  stdout: {}

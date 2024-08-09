@@ -16,19 +16,23 @@ input:
 pipeline:
   processors:
     - python:
-        exe: ./venv/bin/python3
+        exe: python3
         script: |
           import codecs
           msg = content().decode()
-          root = codecs.encode(msg, "rot_13")
+          root.original = msg
+          root.encoded = codecs.encode(msg, "rot_13")
 
 output:
   stdout: {}
+
+logger:
+  level: OFF
 ```
 
 ```
-$ echo My voice is my passport | ./rp-connect-python run --log.level=off rot13.yaml 
-Zl ibvpr vf zl cnffcbeg
+$ echo My voice is my passport | ./rp-connect-python run examples/rot13.yaml
+{"original": "My voice is my passport", "encoded": "Zl ibvpr vf zl cnffcbeg"}
 ```
 
 Currently, the (sub-)interpreter that runs your code provides two hooks back into
@@ -145,6 +149,75 @@ may run best in `single` mode. This includes:
 - Hardcoded still for Python 3.12. Should be portable to 3.13 and,
   in cases of `single` mode, earlier versions. Requires changes to
   `gogopython` I haven't made yet.
+
+## Python Compatability
+This is en evolving list of notes/tips related to using certain
+popular Python modules:
+
+### `requests`
+Works best in `legacy` mode. Known to cause deadlocks on shutdown
+in `single` mode. Currently, can panic `multi` mode on some systems.
+
+> While `requests` is pure Python, it does hook into some modules that
+> are not. Still identifying a race condition causing memory corruption
+> in `multi` mode.
+
+### `numpy`
+Recommends `single` mode as explicitly does not support Python
+sub-interpreters (_a la_ `multi` or `legacy` modes). May work in
+`legacy`, but be careful.
+
+### `pandas`
+Seems to work best on `amd64` systems and in `legacy` mode. Depends on
+`numpy`, so might be best used in `single` mode if stability is a
+concern.
+
+### `pillow`
+Seems to work ok in `legacy` mode, but doesn't support sub-interpreters,
+so recommended to run in `single` mode.
+
+An example of a directory scanner that identifies types of JPEGs:
+
+```yaml
+input:
+  file:
+    paths: [ ./*.jpg ]
+    scanner:
+      to_the_end: {}
+
+pipeline:
+  processors:
+    - python:
+        exe: ./venv/bin/python3
+        mode: single
+        script: |
+          from PIL import Image
+          from io import BytesIO
+
+          infile = BytesIO(content())
+          try:
+            with Image.open(infile) as im:
+              root.format = im.format
+              root.size = im.size
+              root.mode = im.mode
+          except OSError:
+            pass
+    - mapping: |
+        root = this
+        root.path = metadata("path")
+
+output:
+  stdout: {}
+```
+
+Assuming you `pip install` the dependencies of `setuptools` and `pillow`:
+
+```
+$  python3 -m venv venv
+$  ./venv/bin/pip install --quiet -U pip setuptools pillow
+$  ./rp-connect-python run --log.level=off examples/pillow.yaml
+{"format":"JPEG","mode":"RGB","path":"rpcn_and_python.jpg","size":[1024,1024]}
+```
 
 ## License and Supportability
 Source code in this project is licensed under the Apache v2 license unless
