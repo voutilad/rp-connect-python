@@ -2,6 +2,7 @@ package processor
 
 import (
 	"context"
+	_ "embed"
 	"errors"
 	"github.com/voutilad/rp-connect-python/internal/impl/python"
 	"runtime"
@@ -51,25 +52,14 @@ type interpreter struct {
 
 // Python helper for initializing a `content` function, returning bytes from
 // the globals mapping.
-const globalHelperSrc = `
-global content
-def content():
-	# Returns the content of the message being processed.
-	global __content__
-	return __content__
-`
+//
+//go:embed globals.py
+var globalHelperSrc string
 
 // Python helper for serializing the "result" of a processor.
-const jsonHelperSrc = `
-import json
-try:
-	if type(root) is str:
-		result = root
-	else:
-		result = json.dumps(root)
-except:
-	result = None
-`
+//
+//go:embed serializer.py
+var jsonHelperSrc string
 
 // Initialize the Python processor Redpanda Connect module.
 //
@@ -231,7 +221,8 @@ func newSingleRuntimeProcessor(exe string, logger *service.Logger) (*pythonProce
 
 // Process a given Redpanda Connect service.Message using Python.
 func (p *pythonProcessor) Process(ctx context.Context, m *service.Message) (service.MessageBatch, error) {
-	var batch []*service.Message
+	// We currently don't drop on Python errors, but set an error on the message.
+	batch := []*service.Message{m}
 
 	// Acquire an interpreter and look up our local state.
 	token, err := p.runtime.Acquire(ctx)
@@ -239,6 +230,8 @@ func (p *pythonProcessor) Process(ctx context.Context, m *service.Message) (serv
 		return nil, err
 	}
 	defer func() { _ = p.runtime.Release(token) }()
+
+	// Look up our previously initialized interpreter state.
 	i := p.interpreters[token.Id()]
 
 	err = p.runtime.Apply(token, ctx, func() error {
@@ -254,9 +247,9 @@ func (p *pythonProcessor) Process(ctx context.Context, m *service.Message) (serv
 
 		// Prepare our globals. This wires up the Redpanda Connect hook like content().
 		if py.PyEval_EvalCode(i.globalsHelper, globals, locals) == py.NullPyObjectPtr {
-			return errors.New("interpreter not initialized")
+			// If we get here, something horrible has occurred and we cannot recover.
+			panic("Failed to evaluate global helper script.")
 		}
-		py.PyDict_SetItemString(locals, "root", empty)
 
 		// We copy-in the data from Redpanda Connect to the Python interpreter as a
 		// bytes Python object.
@@ -274,6 +267,8 @@ func (p *pythonProcessor) Process(ctx context.Context, m *service.Message) (serv
 		}
 
 		// Evaluate the Python script that was pre-compiled into a code object.
+		// It should have access to global helper functions/classes and should
+		// set a local called "root".
 		result := py.PyEval_EvalCode(i.code, globals, locals)
 		if result == py.NullPyObjectPtr {
 			py.PyErr_Print()
@@ -281,35 +276,31 @@ func (p *pythonProcessor) Process(ctx context.Context, m *service.Message) (serv
 		}
 		defer py.Py_DecRef(result)
 
-		// Gives us a borrowed/weak reference to the item.
+		// The user script should have modified a local called "root".
 		root := py.PyDict_GetItemString(locals, "root")
+		if root == py.NullPyObjectPtr {
+			return errors.New("'root' not found in Python script")
+		}
+
+		// Check our type and use an optimized conversion approach if possible.
 		switch py.BaseType(root) {
 		case py.None:
 			// Drop the message.
-			p.logger.Trace("Received Python None. Dropping message.")
 			batch = []*service.Message{}
-		case py.Unknown:
-			// The script is bad. Fail hard and fast to let the operator know.
-			py.PyErr_Print()
-			return errors.New("'root' not found in Python script")
 		case py.Set:
 			// We can't serialize Sets to JSON. Warn and drop.
-			p.logger.Warn("Cannot serialize Python set.")
-			batch = []*service.Message{}
+			return errors.New("cannot serialize a Python set")
 		case py.Long:
 			long := py.PyLong_AsLong(root)
 			m.SetStructured(long)
-			batch = []*service.Message{m}
 		case py.String:
 			str, err := py.UnicodeToString(root)
 			if err != nil {
-				p.logger.Warn("Unable to decode Python string.")
-				batch = []*service.Message{}
+				return errors.New("unable to decode Python string")
 			} else {
 				// We use SetBytes instead of SetStructured to avoid
 				// having our string wrapped in double-quotes.
 				m.SetBytes([]byte(str))
-				batch = []*service.Message{m}
 			}
 		case py.Bytes:
 			// We need to copy-out the bytes into the message. We get a
@@ -317,7 +308,9 @@ func (p *pythonProcessor) Process(ctx context.Context, m *service.Message) (serv
 			p := py.PyBytes_AsString(root)
 			sz := py.PyBytes_Size(root)
 			m.SetBytes(unsafe.Slice(p, sz))
-			batch = []*service.Message{m}
+		case py.Unknown:
+			// We'll try serializing this to JSON. It could be a Root type.
+			fallthrough
 		case py.Tuple:
 			fallthrough
 		case py.List:
@@ -334,10 +327,12 @@ func (p *pythonProcessor) Process(ctx context.Context, m *service.Message) (serv
 			// reference to the data.
 			resultBytes := py.PyDict_GetItemString(locals, "result")
 			if resultBytes == py.NullPyObjectPtr {
-				return errors.New("result disappeared, oh no")
+				return errors.New("failed to JSON-ify root: missing result")
 			}
 
-			// Use [unsafe] to extract the message data.
+			// If not bytes, we bail. Something is wrong.
+
+			// Before copying out, we need to know the length.
 			sz := py.PyBytes_Size(resultBytes)
 			rawBytes := py.PyBytes_AsString(resultBytes)
 
@@ -345,12 +340,13 @@ func (p *pythonProcessor) Process(ctx context.Context, m *service.Message) (serv
 			buffer := make([]byte, sz)
 			copy(buffer, unsafe.Slice(rawBytes, sz))
 			m.SetBytes(buffer)
-			batch = []*service.Message{m}
 		}
-
 		return nil
 	})
 
+	if err != nil {
+		m.SetError(err)
+	}
 	return batch, err
 }
 
