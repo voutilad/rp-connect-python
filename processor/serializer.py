@@ -26,7 +26,7 @@ try:
 except NameError:
     # 'root' isn't defined in our scope.
     result = None
-except (ValueError, RecursionError, TypeError):
+except (AttributeError, ValueError, RecursionError, TypeError):
     # Something amiss in json.dumps!
     result = None
 

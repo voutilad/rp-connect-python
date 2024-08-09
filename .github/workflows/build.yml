@@ -24,11 +24,14 @@ jobs:
       with:
         go-version: '1.22'
 
-    - name: Build
+    - name: Build without CGO
       run: CGO_ENABLED=0 go build
 
-    - name: Unit Tests
+    - name: Run Go unit tests
       run: go test -v ./internal/... ./processor/
 
-    - name: Integration Test
+    - name: Run Python unit tests
+      run: python -m unittest discover -v -s processor --pattern "*_test.py"
+
+    - name: Run integration test
       run: ./rp-connect-python test test.yaml

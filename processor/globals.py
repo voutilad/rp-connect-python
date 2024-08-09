@@ -21,12 +21,18 @@ class Root:
     """
     def __getattr__(self, name):
         if name in self.__dict__:
-            return self.__dict__
+            return self.__dict__[name]
         self.__dict__[name] = Root()
         return self.__dict__[name]
 
     def __setattr__(self, name, value):
         self.__dict__[name] = value
+
+    def __setitem__(self, key, value):
+        self.__dict__[key] = value
+
+    def __getitem__(self, item):
+        return self.__getattr__(item)
 
     def __str__(self):
         return str(self.__dict__)
