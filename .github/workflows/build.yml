@@ -27,5 +27,8 @@ jobs:
     - name: Build
       run: CGO_ENABLED=0 go build
 
-    - name: Test
+    - name: Unit Tests
       run: go test -v ./internal/... ./processor/
+
+    - name: Integration Test
+      run: ./rp-connect-python test test.yaml

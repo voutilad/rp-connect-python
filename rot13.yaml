@@ -5,11 +5,12 @@ input:
 pipeline:
   processors:
     - python:
-        exe: ./venv/bin/python3
+        exe: python3
         script: |
           import codecs
           msg = content().decode()
-          root = codecs.encode(msg, "rot_13")
+          root.original = msg
+          root.encoded = codecs.encode(msg, "rot_13")
 
 output:
   stdout: {}

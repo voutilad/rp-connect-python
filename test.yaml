@@ -1,0 +1,67 @@
+###############################################################################
+# Integration test for rp-connect-python.
+#
+# Exercises as much surface area as possible to find regressions.
+#
+###############################################################################
+http:
+  enabled: false
+input:
+  stdin: {}
+output:
+  stdout: {}
+
+pipeline:
+  processors:
+    - python:
+        mode: multi
+        script: |
+          # Return a lowercase version.
+          msg = content().decode()
+          root = msg.lower()
+    - python:
+        mode: legacy
+        script: |
+          # Filter to just A-Za-z.
+          msg = content().decode()
+          root = "".join([c for c in msg if c.isalpha()])
+    - python:
+        mode: single
+        script: |
+          # Compute letter frequency and report most common.
+          letters = content().decode()
+
+          freq = {}
+          for c in letters:
+            freq.update({c: freq.get(c, 0) + 1})
+          root.frequency = freq
+
+          root.max = 0
+          root.most = []
+          for k, v in freq.items():
+            if v > root.max:
+              root.most = [k]
+              root.max = v
+            elif v == root.max:
+              root.most.append(k)
+
+tests:
+  - name: Integration test
+    target_processors: /pipeline/processors
+    input_batch:
+      - content: Hello world!
+      - content: This page intentionally left blank.
+    output_batches:
+      -   # Hello world!
+        - json_equals:
+            frequency: {"h": 1, "e": 1, "l": 3, "o": 2, "w": 1, "r": 1, "d": 1}
+            max: 3
+            most:
+              - l
+          # This page intentionally left blank.
+        - json_contains:
+            max: 4
+            most:
+              - t
+              - n
+              - l
