@@ -988,8 +988,8 @@ github.com/vmihailenco/msgpack/v5 v5.4.1 h1:cQriyiUvjTwOHg8QZaPihLWeRAAVoCpE00IU
 github.com/vmihailenco/msgpack/v5 v5.4.1/go.mod h1:GaZTsDaehaPpQVyxrf5mtQlH+pc21PIudVV/E3rRQok=
 github.com/vmihailenco/tagparser/v2 v2.0.0 h1:y09buUbR+b5aycVFQs/g70pqKVZNBmxwAhO7/IwNM9g=
 github.com/vmihailenco/tagparser/v2 v2.0.0/go.mod h1:Wri+At7QHww0WTrCBeu4J6bNtoV6mEfg5OIWRZA9qds=
-github.com/voutilad/gogopython v0.8.0 h1:QzfUXdTpF8mXwhkAClURVaZ+QBeXUT9Md5hu85hQiX4=
-github.com/voutilad/gogopython v0.8.0/go.mod h1:ZGCFC/OXFNHhCtO+4qC+sooSpJtTse3gyioCefvL3WA=
+github.com/voutilad/gogopython v0.9.0 h1:at5l38ZDJ14wxXoOdzCYHTBqCyPcqZOOzB+YuSUQlUg=
+github.com/voutilad/gogopython v0.9.0/go.mod h1:ZGCFC/OXFNHhCtO+4qC+sooSpJtTse3gyioCefvL3WA=
 github.com/wI2L/jsondiff v0.4.0 h1:iP56F9tK83eiLttg3YdmEENtZnwlYd3ezEpNNnfZVyM=
 github.com/wI2L/jsondiff v0.4.0/go.mod h1:nR/vyy1efuDeAtMwc3AF6nZf/2LD1ID8GTyyJ+K8YB0=
 github.com/xdg-go/pbkdf2 v1.0.0 h1:Su7DPu48wXMwC3bs7MCNG+z4FhcyEuz5dlvchbq0B0c=
