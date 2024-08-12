@@ -203,11 +203,9 @@ pipeline:
               root.format = im.format
               root.size = im.size
               root.mode = im.mode
+              root.path = metadata("path")
           except OSError:
             pass
-    - mapping: |
-        root = this
-        root.path = metadata("path")
 
 output:
   stdout: {}
