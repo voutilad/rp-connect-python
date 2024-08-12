@@ -4,6 +4,7 @@ import (
 	"context"
 	_ "embed"
 	"errors"
+	"github.com/ebitengine/purego"
 	"github.com/voutilad/rp-connect-python/internal/impl/python"
 	"runtime"
 	"strings"
@@ -16,9 +17,12 @@ import (
 )
 
 const (
-	GLOBAL_CONTENT      = "__content"      // GLOBAL_CONTENT provides bytes from a Message.
-	GLOBAL_METADATA     = "__metadata"     // GLOBAL_METADATA provides the "metadata" function.
-	GLOBAL_MESSAGE_ADDR = "__message_addr" // GLOBAL_MESSAGE_POINTER points to a service.Message
+	// GlobalContent provides bytes from a Message.
+	GlobalContent = "__content_callback"
+	// GlobalMetadata provides the "metadata" function.
+	GlobalMetadata = "__metadata_callback"
+	// GlobalMessageAddr points to a service.Message
+	GlobalMessageAddr = "__message_addr"
 )
 
 type mode string
@@ -62,6 +66,16 @@ type interpreter struct {
 
 	// globals is the Python globals we use for injecting state.
 	globals py.PyObjectPtr
+
+	// callbacks we've registered with the interpreter.
+	callbacks []*callback
+}
+
+type callbackFunc func(self, args py.PyObjectPtr) py.PyObjectPtr
+
+type callback struct {
+	Definition *py.PyMethodDef
+	Object     py.PyObjectPtr
 }
 
 // Python helper for initializing a `content` function, returning bytes from
@@ -115,6 +129,20 @@ func init() {
 		// There's no way to fail initialization. We must panic. :(
 		panic(err)
 	}
+}
+
+func newCallback(name string, f callbackFunc) (*callback, error) {
+	// TODO: push this into gogopython
+	def := py.PyMethodDef{
+		Name:   unsafe.StringData(name),
+		Flags:  py.MethodVarArgs,
+		Method: purego.NewCallback(f),
+	}
+	fn := py.PyCFunction_NewEx(&def, py.NullPyObjectPtr, py.NullPyObjectPtr)
+	if fn == py.NullPyObjectPtr {
+		return nil, errors.New("failed to create python function")
+	}
+	return &callback{Definition: &def, Object: fn}, nil
 }
 
 // newPythonProcessor creates new Python processor instance with the provided
@@ -171,13 +199,22 @@ func newPythonProcessor(exe, script string, mode mode, logger *service.Logger) (
 			return errors.New("failed to compile python JSON helper script")
 		}
 
-		// Pre-populate our globals mapping and callback function(s).
-		fn := py.NewFunction("__metadata", py.NullPyObjectPtr, metadataCallback)
-		if fn == py.NullPyObjectPtr {
-			return errors.New("failed to create metadata callback function")
+		// Create our callback functions.
+		metadata, err := newCallback(GlobalMetadata, metadataCallback)
+		if err != nil {
+			return err
 		}
+		content, err := newCallback(GlobalContent, contentCallback)
+		if err != nil {
+			return err
+		}
+
+		// Pre-populate globals.
 		globals := py.PyDict_New()
-		if py.PyDict_SetItemString(globals, GLOBAL_METADATA, fn) != 0 {
+		if py.PyDict_SetItemString(globals, GlobalMetadata, metadata.Object) != 0 {
+			return errors.New("failed to set callback function in global mapping")
+		}
+		if py.PyDict_SetItemString(globals, GlobalContent, content.Object) != 0 {
 			return errors.New("failed to set callback function in global mapping")
 		}
 
@@ -186,6 +223,7 @@ func newPythonProcessor(exe, script string, mode mode, logger *service.Logger) (
 			globalsHelper: globalsHelper,
 			jsonHelper:    jsonHelper,
 			globals:       globals,
+			callbacks:     []*callback{metadata, content},
 		}
 		return nil
 	})
@@ -242,6 +280,41 @@ func newSingleRuntimeProcessor(exe string, logger *service.Logger) (*pythonProce
 	}
 	p.alive.Store(1)
 	return &p, nil
+}
+
+// contentCallback is called from Python and copies the underlying bytes of
+// a service.Message into Python. It has a Python function definition like:
+//
+// def __content(__msg)
+//
+//	where __msg is the virtual address of the service.Message.
+func contentCallback(_, tuple py.PyObjectPtr) py.PyObjectPtr {
+	if py.BaseType(tuple) != py.Tuple {
+		panic("argument should be a Python tuple")
+	}
+
+	// First argument is a pointer to our service.Message.
+	var m *service.Message
+	addr := py.PyTuple_GetItem(tuple, 0)
+	if addr == py.NullPyObjectPtr {
+		panic("first tuple item should not be null")
+	}
+	m = (*service.Message)(unsafe.Pointer(uintptr(py.PyLong_AsUnsignedLong(addr))))
+
+	// Create a Python bytes object and return it.
+	data, err := m.AsBytes()
+	if err != nil {
+		// TODO: return None instead of empty bytes?
+		return py.PyBytes_FromStringAndSize(nil, 0)
+	}
+
+	bytes := py.PyBytes_FromStringAndSize(unsafe.SliceData(data), int64(len(data)))
+	if bytes == py.NullPyObjectPtr {
+		// In order of the callback to return nil, we need to set an exception,
+		// but we don't have those hooks in gogopython yet.
+		panic("failed to create Python bytes")
+	}
+	return bytes
 }
 
 // metadataCallback is called from Python and has a Python function definition
@@ -320,40 +393,22 @@ func (p *pythonProcessor) Process(ctx context.Context, m *service.Message) (serv
 	i := p.interpreters[token.Id()]
 
 	err = p.runtime.Apply(token, ctx, func() error {
-		// We need to set up some bindings so the script can actually _do_ something with our message.
-		// For now, we'll use a bit of a hack to create a `content()` function.
+		// Create some temporary state for this message.
 		locals := py.PyDict_New()
 		empty := py.PyDict_New()
-
 		defer py.Py_DecRef(locals)
 		defer py.Py_DecRef(empty)
 
 		// Set up our pointer to our service.Message.
 		addr := py.PyLong_FromUnsignedLong(uint64(uintptr(unsafe.Pointer(m))))
-		if py.PyDict_SetItemString(i.globals, GLOBAL_MESSAGE_ADDR, addr) != 0 {
+		if py.PyDict_SetItemString(i.globals, GlobalMessageAddr, addr) != 0 {
 			return errors.New("failed to set address of message")
 		}
 
-		// TODO: move this?
 		// Prepare our globals. This wires up the Redpanda Connect hook like content().
 		if py.PyEval_EvalCode(i.globalsHelper, i.globals, locals) == py.NullPyObjectPtr {
 			// If we get here, something horrible has occurred and we cannot recover.
 			panic("Failed to evaluate global helper script.")
-		}
-
-		// We copy-in the data from Redpanda Connect to the Python interpreter as a
-		// bytes Python object.
-		data, err := m.AsBytes()
-		if err != nil {
-			return err
-		}
-		bytes := py.PyBytes_FromStringAndSize(unsafe.SliceData(data), int64(len(data)))
-		if bytes == py.NullPyObjectPtr {
-			return errors.New("failed to create Python bytes")
-		}
-		defer py.Py_DecRef(bytes)
-		if py.PyDict_SetItemString(i.globals, GLOBAL_CONTENT, bytes) != 0 {
-			return errors.New("failed to copy-in message bytes")
 		}
 
 		// Evaluate the Python script that was pre-compiled into a code object.

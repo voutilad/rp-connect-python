@@ -1,18 +1,19 @@
 """
 Creates an environment similar to the one available in Bloblang.
 """
-global __content      # bytes of the service.Message
-global __metadata     # our metadata callback function implemented in Go
+global __content_callback      # our content callback function implemented in Go
+global __metadata_callback     # our metadata callback function implemented in Go
 global __message_addr # the virtual address of a service.Message
 
 def content():
     """
-    Provides access to a message's data as bytes, similar to Bloblang's
-    `content()` function.
+    Proxies a call to our callback `__content()` that will copy-in the bytes
+    from the message.
     :return: bytes
     """
-    global __content
-    return __content
+    global __content_callback
+    global __message_addr
+    return __content_callback(__message_addr)
 
 
 def metadata(key = ""):
@@ -22,9 +23,9 @@ def metadata(key = ""):
     :param key: optional key for retrieving a particular metadata value.
     :return: metadata from Redpanda Connect
     """
-    global __metadata
+    global __metadata_callback
     global __message_addr
-    value = __metadata(__message_addr, key)
+    value = __metadata_callback(__message_addr, key)
     if value == "":
         # This is our "no such value for key" response.
         return None
