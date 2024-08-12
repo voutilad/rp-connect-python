@@ -1,0 +1,16 @@
+# metadata.yaml
+input:
+  file:
+    paths: [ ./examples/*.yaml ]
+    scanner:
+      to_the_end: { }
+
+pipeline:
+  processors:
+    - python:
+        exe: python3
+        script: |
+          root.path = metadata("path")
+
+output:
+  stdout: {}

@@ -15,6 +15,12 @@ import (
 	py "github.com/voutilad/gogopython"
 )
 
+const (
+	GLOBAL_CONTENT      = "__content"      // GLOBAL_CONTENT provides bytes from a Message.
+	GLOBAL_METADATA     = "__metadata"     // GLOBAL_METADATA provides the "metadata" function.
+	GLOBAL_MESSAGE_ADDR = "__message_addr" // GLOBAL_MESSAGE_POINTER points to a service.Message
+)
+
 type mode string
 
 const (
@@ -45,9 +51,17 @@ type pythonProcessor struct {
 }
 
 type interpreter struct {
-	code          py.PyCodeObjectPtr
+	// code is the compiled form of the Processor's Python script.
+	code py.PyCodeObjectPtr
+
+	// globalsHelper is the compiled form of globals.py.
 	globalsHelper py.PyCodeObjectPtr
-	jsonHelper    py.PyCodeObjectPtr
+
+	// jsonHelper is the compiled form of serializer.py.
+	jsonHelper py.PyCodeObjectPtr
+
+	// globals is the Python globals we use for injecting state.
+	globals py.PyObjectPtr
 }
 
 // Python helper for initializing a `content` function, returning bytes from
@@ -150,17 +164,28 @@ func newPythonProcessor(exe, script string, mode mode, logger *service.Logger) (
 			return errors.New("failed to compile python globals helper script")
 		}
 
-		// Pre-compile our script and helpers.
+		// Pre-compile our serialization helper.
 		jsonHelper := py.Py_CompileString(jsonHelperSrc, "__json_helper__.py", py.PyFileInput)
 		if jsonHelper == py.NullPyCodeObjectPtr {
 			py.PyErr_Print()
 			return errors.New("failed to compile python JSON helper script")
 		}
 
+		// Pre-populate our globals mapping and callback function(s).
+		fn := py.NewFunction("__metadata", py.NullPyObjectPtr, metadataCallback)
+		if fn == py.NullPyObjectPtr {
+			return errors.New("failed to create metadata callback function")
+		}
+		globals := py.PyDict_New()
+		if py.PyDict_SetItemString(globals, GLOBAL_METADATA, fn) != 0 {
+			return errors.New("failed to set callback function in global mapping")
+		}
+
 		processor.interpreters[token.Id()] = interpreter{
 			code:          code,
 			globalsHelper: globalsHelper,
 			jsonHelper:    jsonHelper,
+			globals:       globals,
 		}
 		return nil
 	})
@@ -219,6 +244,66 @@ func newSingleRuntimeProcessor(exe string, logger *service.Logger) (*pythonProce
 	return &p, nil
 }
 
+// metadataCallback is called from Python and has a Python function definition
+// that looks like:
+//
+// def __metadata(__msg -> int, key = "")
+//
+// where __msg is the virtual address of the service.Message and key is a
+// string containing the key of the metadata item to retrieve.
+func metadataCallback(_, tuple py.PyObjectPtr) py.PyObjectPtr {
+	if py.BaseType(tuple) != py.Tuple {
+		panic("argument should be a Python tuple")
+	}
+
+	// First argument is a pointer to our service.Message.
+	var m *service.Message
+	addr := py.PyTuple_GetItem(tuple, 0)
+	if addr == py.NullPyObjectPtr {
+		panic("first tuple item should not be null")
+	}
+	m = (*service.Message)(unsafe.Pointer(uintptr(py.PyLong_AsUnsignedLong(addr))))
+
+	// Second argument is an optional key. Empty string denotes "all keys".
+	str := py.PyTuple_GetItem(tuple, 1)
+	key, err := py.UnicodeToString(str)
+	if err != nil {
+		// TODO: raise Python exception
+		panic(err)
+	}
+
+	// Now we copy the value (if any) into Python.
+	val, ok := m.MetaGetMut(key)
+	if !ok {
+		// No such metadata.
+		// TODO: return None
+		return py.PyUnicode_FromString("")
+	}
+
+	switch val := val.(type) {
+	case string:
+		return py.PyUnicode_FromString(val)
+	case int:
+		return py.PyLong_FromLong(int64(val))
+	case uint:
+		return py.PyLong_FromUnsignedLong(uint64(val))
+	case bool:
+		// XXX this is ugly...seriously? I really don't like Go. :P
+		var i int64
+		if val {
+			i = 1
+		} else {
+			i = 0
+		}
+		return py.PyBool_FromLong(i)
+	default:
+		// TODO: catch more types in the switch.
+		// XXX for now, we bail out to a string.
+		s, _ := m.MetaGet(key) // always true
+		return py.PyUnicode_FromString(s)
+	}
+}
+
 // Process a given Redpanda Connect service.Message using Python.
 func (p *pythonProcessor) Process(ctx context.Context, m *service.Message) (service.MessageBatch, error) {
 	// We currently don't drop on Python errors, but set an error on the message.
@@ -237,16 +322,21 @@ func (p *pythonProcessor) Process(ctx context.Context, m *service.Message) (serv
 	err = p.runtime.Apply(token, ctx, func() error {
 		// We need to set up some bindings so the script can actually _do_ something with our message.
 		// For now, we'll use a bit of a hack to create a `content()` function.
-		globals := py.PyDict_New()
 		locals := py.PyDict_New()
 		empty := py.PyDict_New()
 
-		defer py.Py_DecRef(globals)
 		defer py.Py_DecRef(locals)
 		defer py.Py_DecRef(empty)
 
+		// Set up our pointer to our service.Message.
+		addr := py.PyLong_FromUnsignedLong(uint64(uintptr(unsafe.Pointer(m))))
+		if py.PyDict_SetItemString(i.globals, GLOBAL_MESSAGE_ADDR, addr) != 0 {
+			return errors.New("failed to set address of message")
+		}
+
+		// TODO: move this?
 		// Prepare our globals. This wires up the Redpanda Connect hook like content().
-		if py.PyEval_EvalCode(i.globalsHelper, globals, locals) == py.NullPyObjectPtr {
+		if py.PyEval_EvalCode(i.globalsHelper, i.globals, locals) == py.NullPyObjectPtr {
 			// If we get here, something horrible has occurred and we cannot recover.
 			panic("Failed to evaluate global helper script.")
 		}
@@ -262,14 +352,14 @@ func (p *pythonProcessor) Process(ctx context.Context, m *service.Message) (serv
 			return errors.New("failed to create Python bytes")
 		}
 		defer py.Py_DecRef(bytes)
-		if py.PyDict_SetItemString(globals, "__content__", bytes) != 0 {
+		if py.PyDict_SetItemString(i.globals, GLOBAL_CONTENT, bytes) != 0 {
 			return errors.New("failed to copy-in message bytes")
 		}
 
 		// Evaluate the Python script that was pre-compiled into a code object.
 		// It should have access to global helper functions/classes and should
 		// set a local called "root".
-		result := py.PyEval_EvalCode(i.code, globals, locals)
+		result := py.PyEval_EvalCode(i.code, i.globals, locals)
 		if result == py.NullPyObjectPtr {
 			py.PyErr_Print()
 			return errors.New("problem executing Python script")
@@ -317,7 +407,7 @@ func (p *pythonProcessor) Process(ctx context.Context, m *service.Message) (serv
 			fallthrough
 		case py.Dict:
 			// Convert to JSON for now with Python's help ;) because YOLO
-			convertResult := py.PyEval_EvalCode(i.jsonHelper, globals, locals)
+			convertResult := py.PyEval_EvalCode(i.jsonHelper, i.globals, locals)
 			if convertResult == py.NullPyObjectPtr {
 				return errors.New("failed to JSON-ify root")
 			}
