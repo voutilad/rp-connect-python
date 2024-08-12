@@ -2,6 +2,7 @@ package processor
 
 import (
 	"errors"
+	"fmt"
 	"unsafe"
 
 	"github.com/ebitengine/purego"
@@ -92,6 +93,47 @@ func metadataCallback(_, tuple py.PyObjectPtr) py.PyObjectPtr {
 	if err != nil {
 		// TODO: raise Python exception
 		panic(err)
+	}
+
+	// In Bloblang, calling `metadata()` returns a map of all metadata values.
+	// XXX unfinished!
+	if key == "" {
+		dict := py.PyDict_New()
+		err = m.MetaWalkMut(func(key string, val any) error {
+			// Non-exhaustive type list.
+			var obj py.PyObjectPtr
+			switch val := val.(type) {
+			case string:
+				obj = py.PyUnicode_FromString(val)
+			case int, int8, int16, int32, int64:
+				obj = py.PyLong_FromLong(val.(int64))
+			case uint, uint8, uint16, uint32, uint64:
+				obj = py.PyLong_FromUnsignedLong(val.(uint64))
+			case float32, float64:
+				obj = py.PyFloat_FromDouble(val.(float64))
+			case bool:
+				// XXX this is ugly...seriously? I really don't like Go. :P
+				var i int64
+				if val {
+					i = 1
+				} else {
+					i = 0
+				}
+				obj = py.PyBool_FromLong(i)
+			default:
+				// TODO: catch more types in the switch.
+				// XXX for now, we bail out to a string.
+				str := fmt.Sprintf("%s", val)
+				obj = py.PyUnicode_FromString(str)
+			}
+
+			// Dict takes ownership of obj now.
+			py.PyDict_SetItemString(dict, key, obj)
+			return nil
+		})
+
+		// XXX early return.
+		return dict
 	}
 
 	// Now we copy the value (if any) into Python.

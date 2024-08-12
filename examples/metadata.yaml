@@ -10,6 +10,7 @@ pipeline:
     - python:
         exe: python3
         script: |
+          root.all = metadata()
           root.path = metadata("path")
 
 output:
