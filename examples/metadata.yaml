@@ -12,6 +12,10 @@ pipeline:
         script: |
           root.all = metadata()
           root.path = metadata("path")
+          meta["junk"] = {"message": "Hello World"}
+          meta["name"] = "dave"
+    - mapping: |
+        root.metadata = metadata()
 
 output:
   stdout: {}

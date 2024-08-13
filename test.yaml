@@ -19,12 +19,16 @@ pipeline:
           # Return a lowercase version.
           msg = content().decode()
           root = msg.lower()
+          # Set a metadata value.
+          meta["key"] = "a string value"
     - python:
         mode: legacy
         script: |
           # Filter to just A-Za-z.
           msg = content().decode()
           root = "".join([c for c in msg if c.isalpha()])
+          # Set a complex metadata value and read existing metadata.
+          meta["complex"] = {"name": "Dave", "key": metadata("key")}
     - python:
         mode: single
         script: |
@@ -58,6 +62,11 @@ tests:
             max: 3
             most:
               - l
+          metadata_equals:
+            key: a string value
+            complex:
+              name: Dave
+              key: a string value
           # This page intentionally left blank.
         - json_contains:
             max: 4
@@ -65,3 +74,8 @@ tests:
               - t
               - n
               - l
+          metadata_equals:
+            key: a string value
+            complex:
+              name: Dave
+              key: a string value

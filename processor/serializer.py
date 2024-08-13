@@ -18,15 +18,23 @@ class RootEncoder(json.JSONEncoder):
 
 
 try:
-    if type(root) is Root:
-        result = json.dumps(root, cls=RootEncoder).encode()
-    else:
-        # YOLO.
-        result = json.dumps(root).encode()
+    if root:
+        if type(root) is Root:
+            encoder = RootEncoder
+        else:
+            encoder = None
+        result = json.dumps(root, cls=encoder).encode()
+
 except NameError:
     # 'root' isn't defined in our scope.
-    result = None
+    pass
 except (AttributeError, ValueError, RecursionError, TypeError):
     # Something amiss in json.dumps!
     result = None
 
+try:
+    if meta:
+        meta_result = json.dumps(meta)
+except NameError:
+    # 'meta' not in our scope.
+    pass

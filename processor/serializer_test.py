@@ -84,6 +84,37 @@ class SerializerTest(unittest.TestCase):
         result = _locals["result"]
         self.assertIsNone(result, "Result should be None.")
 
+    def test_serializing_meta(self):
+        """
+        Similar to handling root, but a bit simpler. meta should only be a
+        dict of POPO.
+        """
+        metadata = {
+            "name": "Dave",
+            "list": [1, 2, 3],
+            "tuple": (1, "two"),
+            "dict": {"last": "Voutila"},
+        }
+        _globals = {"Root": Dummy}
+        _locals = {"root": Dummy(), "meta": metadata}
+        exec(self.source, _globals, _locals)
+
+        # We shouldn't have any root result.
+        self.assertTrue("result" in _locals, "Should have set a local 'result'.")
+        result = _locals["result"]
+        self.assertIsNone(result, "Result should be None.")
+
+        self.assertTrue("meta_result" in _locals,
+                        "Should have set a local 'meta_result'.")
+        meta_result = _locals["meta_result"]
+        self.assertEqual(type(meta_result), str,
+                         "meta_result should be a string.")
+        self.assertEqual(
+            meta_result,
+            '{"name": "Dave", "list": [1, 2, 3], "tuple": [1, "two"], "dict": {"last": "Voutila"}}',
+            "Bytes should decode to expected JSON output."
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

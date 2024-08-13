@@ -3,7 +3,9 @@ package processor
 import (
 	"context"
 	_ "embed"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"github.com/voutilad/rp-connect-python/internal/impl/python"
 	"runtime"
 	"strings"
@@ -49,7 +51,7 @@ func stringAsMode(s string) mode {
 type pythonProcessor struct {
 	logger       *service.Logger
 	runtime      python.Runtime
-	interpreters map[int64]interpreter
+	interpreters map[int64]*interpreter
 	alive        atomic.Int32
 }
 
@@ -200,7 +202,7 @@ func newPythonProcessor(exe, script string, mode mode, logger *service.Logger) (
 			return errors.New("failed to set callback function in global mapping")
 		}
 
-		processor.interpreters[token.Id()] = interpreter{
+		processor.interpreters[token.Id()] = &interpreter{
 			code:          code,
 			globalsHelper: globalsHelper,
 			jsonHelper:    jsonHelper,
@@ -228,7 +230,7 @@ func newMultiRuntimeProcessor(exe string, logger *service.Logger) (*pythonProces
 	p := pythonProcessor{
 		logger:       logger,
 		runtime:      r,
-		interpreters: make(map[int64]interpreter),
+		interpreters: make(map[int64]*interpreter),
 	}
 	p.alive.Store(int32(cnt))
 	return &p, nil
@@ -244,7 +246,7 @@ func newLegacyRuntimeProcessor(exe string, logger *service.Logger) (*pythonProce
 	p := pythonProcessor{
 		logger:       logger,
 		runtime:      r,
-		interpreters: make(map[int64]interpreter),
+		interpreters: make(map[int64]*interpreter),
 	}
 	p.alive.Store(int32(cnt))
 	return &p, nil
@@ -259,7 +261,7 @@ func newSingleRuntimeProcessor(exe string, logger *service.Logger) (*pythonProce
 	p := pythonProcessor{
 		logger:       logger,
 		runtime:      r,
-		interpreters: make(map[int64]interpreter),
+		interpreters: make(map[int64]*interpreter),
 	}
 	p.alive.Store(1)
 	return &p, nil
@@ -267,9 +269,6 @@ func newSingleRuntimeProcessor(exe string, logger *service.Logger) (*pythonProce
 
 // Process a given Redpanda Connect service.Message using Python.
 func (p *pythonProcessor) Process(ctx context.Context, m *service.Message) (service.MessageBatch, error) {
-	// We currently don't drop on Python errors, but set an error on the message.
-	batch := []*service.Message{m}
-
 	// Acquire an interpreter and look up our local state.
 	token, err := p.runtime.Acquire(ctx)
 	if err != nil {
@@ -279,6 +278,9 @@ func (p *pythonProcessor) Process(ctx context.Context, m *service.Message) (serv
 
 	// Look up our previously initialized interpreter state.
 	i := p.interpreters[token.Id()]
+
+	// Assume we're successful and that we'll be returning a batch of 1 message.
+	batch := []*service.Message{m}
 
 	err = p.runtime.Apply(token, ctx, func() error {
 		// Clear out any local state from previous messages.
@@ -315,71 +317,180 @@ func (p *pythonProcessor) Process(ctx context.Context, m *service.Message) (serv
 		if root == py.NullPyObjectPtr {
 			return errors.New("'root' not found in Python script")
 		}
-
-		// Check our type and use an optimized conversion approach if possible.
-		switch py.BaseType(root) {
-		case py.None:
-			// Drop the message.
+		drop, err := handleRoot(root, m, i)
+		if drop {
 			batch = []*service.Message{}
-		case py.Set:
-			// We can't serialize Sets to JSON. Warn and drop.
-			return errors.New("cannot serialize a Python set")
-		case py.Long:
-			long := py.PyLong_AsLong(root)
-			m.SetStructured(long)
-		case py.String:
-			str, err := py.UnicodeToString(root)
-			if err != nil {
-				return errors.New("unable to decode Python string")
-			} else {
-				// We use SetBytes instead of SetStructured to avoid
-				// having our string wrapped in double-quotes.
-				m.SetBytes([]byte(str))
-			}
-		case py.Bytes:
-			// We need to copy-out the bytes into the message. We get a
-			// pointer to the underlying data managed by Python.
-			p := py.PyBytes_AsString(root)
-			sz := py.PyBytes_Size(root)
-			m.SetBytes(unsafe.Slice(p, sz))
-		case py.Unknown:
-			// We'll try serializing this to JSON. It could be a Root type.
-			fallthrough
-		case py.Tuple:
-			fallthrough
-		case py.List:
-			fallthrough
-		case py.Dict:
-			// Convert to JSON for now with Python's help ;) because YOLO
-			result = py.PyEval_EvalCode(i.jsonHelper, i.globals, i.locals)
-			if result == py.NullPyObjectPtr {
-				return errors.New("failed to JSON-ify root")
-			}
-			py.Py_DecRef(result)
-
-			// The "result" should now be JSON as utf8 bytes. Get a weak
-			// reference to the data.
-			resultBytes := py.PyDict_GetItemString(i.locals, "result")
-			if resultBytes == py.NullPyObjectPtr {
-				return errors.New("failed to JSON-ify root: missing result")
-			}
-
-			// Before copying out, we need to know the length.
-			sz := py.PyBytes_Size(resultBytes)
-			rawBytes := py.PyBytes_AsString(resultBytes)
-
-			// Copy the data out from Python land into Redpanda Connect.
-			buffer := make([]byte, sz)
-			copy(buffer, unsafe.Slice(rawBytes, sz))
-			m.SetBytes(buffer)
 		}
-		return nil
+
+		// The user might have modified the "meta" mapping to set new metadata
+		// on the message.
+		meta := py.PyDict_GetItemString(i.locals, "meta")
+		if meta != py.NullPyObjectPtr {
+			err = handleMeta(meta, m, i)
+		}
+		return err
 	})
 
 	if err != nil {
 		m.SetError(err)
 	}
 	return batch, err
+}
+
+// handleRoot post-processes the `root` object the Python script may have
+// mutated at runtime.
+func handleRoot(root py.PyObjectPtr, m *service.Message, i *interpreter) (drop bool, err error) {
+	// Check our type and use an optimized conversion approach if possible.
+	switch py.BaseType(root) {
+	case py.None:
+		// Drop the message.
+		return true, nil
+	case py.Set:
+		// We can't serialize Sets to JSON.
+		return false, errors.New("cannot serialize a Python set")
+	case py.Long:
+		long := py.PyLong_AsLong(root)
+		m.SetStructured(long)
+	case py.String:
+		str, err := py.UnicodeToString(root)
+		if err != nil {
+			return false, errors.New("unable to decode Python string")
+		} else {
+			// We use SetBytes instead of SetStructured to avoid
+			// having our string wrapped in double-quotes.
+			m.SetBytes([]byte(str))
+		}
+	case py.Bytes:
+		// We need to copy-out the bytes into the message. We get a
+		// pointer to the underlying data managed by Python.
+		p := py.PyBytes_AsString(root)
+		sz := py.PyBytes_Size(root)
+		m.SetBytes(unsafe.Slice(p, sz))
+	case py.Unknown:
+		// We'll try serializing this to JSON. It could be a Root type.
+		fallthrough
+	case py.Tuple, py.List, py.Dict:
+		// Convert to JSON for now with Python's help ;) because YOLO
+		result := py.PyEval_EvalCode(i.jsonHelper, i.globals, i.locals)
+		if result == py.NullPyObjectPtr {
+			return false, errors.New("failed to JSON-ify root")
+		}
+		py.Py_DecRef(result)
+
+		// The "result" should now be JSON as utf8 bytes. Get a weak
+		// reference to the data.
+		resultBytes := py.PyDict_GetItemString(i.locals, "result")
+		if resultBytes == py.NullPyObjectPtr {
+			return false, errors.New("failed to JSON-ify root: missing result")
+		}
+
+		// Before copying out, we need to know the length.
+		sz := py.PyBytes_Size(resultBytes)
+		rawBytes := py.PyBytes_AsString(resultBytes)
+
+		// Copy the data out from Python land into Redpanda Connect.
+		buffer := make([]byte, sz)
+		copy(buffer, unsafe.Slice(rawBytes, sz))
+		m.SetBytes(buffer)
+	}
+	return false, nil
+}
+
+// handleMeta extracts any metadata updates made by the Python script.
+//
+// It's far from efficient for container values (lists, tuples, dicts) as it
+// relies on the Python side serializing to JSON and the Go side
+// deserializing from JSON.
+func handleMeta(meta py.PyObjectPtr, m *service.Message, i *interpreter) error {
+	if py.BaseType(meta) != py.Dict {
+		return errors.New("meta python type is not a dictionary")
+	}
+
+	keys := py.PyDict_Keys(meta)
+	if keys == py.NullPyObjectPtr {
+		return errors.New("failed to get keys from metadata dictionary")
+	}
+	if py.BaseType(keys) != py.List {
+		// This should not happen. If it does, something is horribly wrong.
+		panic("keys wasn't a Python list?!")
+	}
+
+	for idx := int64(0); idx < py.PyList_Size(keys); idx++ {
+		key := py.PyList_GetItem(keys, idx)
+		if key == py.NullPyObjectPtr {
+			// Shouldn't happen...
+			panic("metadata dictionary key was null")
+		}
+		keyString, err := py.UnicodeToString(key)
+		if err != nil {
+			panic("could not decode dictionary key")
+		}
+		val := py.PyDict_GetItem(meta, key)
+		if val == py.NullPyObjectPtr {
+			// We shouldn't get null pointers. Something is wrong.
+			panic(fmt.Sprintf("metadata dictionary value was null for key %s", keyString))
+		}
+
+		switch py.BaseType(val) {
+		case py.None:
+			// Remove our dictionary item.
+			m.MetaDelete(keyString)
+		case py.String:
+			valString, err := py.UnicodeToString(val)
+			if err != nil {
+				panic("could not decode Python string used as metadata value")
+			}
+			m.MetaSetMut(keyString, valString)
+		case py.Bytes:
+			p := py.PyBytes_AsString(val)
+			sz := py.PyBytes_Size(val)
+			m.MetaSetMut(keyString, unsafe.Slice(p, sz))
+		case py.Long:
+			long := py.PyLong_AsLong(val)
+			m.MetaSetMut(keyString, long)
+		case py.Float:
+			float := py.PyFloat_AsDouble(val)
+			m.MetaSetMut(keyString, float)
+		case py.Tuple, py.List, py.Dict:
+			// We need to use a new local state to not clobber the dict we're
+			// iterating over already.
+			locals := py.PyDict_New()
+			py.PyDict_SetItemString(locals, "meta", val)
+
+			result := py.PyEval_EvalCode(i.jsonHelper, i.globals, locals)
+			if result == py.NullPyObjectPtr {
+				py.Py_DecRef(locals)
+				return errors.New("failed to JSON-ify metadata value")
+			}
+			py.Py_DecRef(result)
+
+			// The "result" should now be JSON as utf8.
+			metaResult := py.PyDict_GetItemString(locals, "meta_result")
+			py.Py_DecRef(locals)
+			if metaResult == py.NullPyObjectPtr {
+				return errors.New("failed to JSON-ify root: missing result")
+			}
+
+			// Before copying out, we need to know the length.
+			str, err := py.UnicodeToString(metaResult)
+			if err != nil {
+				panic("failed to decode meta_result, should be a Python string")
+			}
+
+			// XXX unmarshal the JSON back into Go objects using the json
+			// module. This handles nested structures nicely and saves on
+			// writing a bunch of recursive extraction code.
+			var _map map[string]any
+			err = json.Unmarshal([]byte(str), &_map)
+			if err != nil {
+				panic(fmt.Sprintf("%s: %s", "failed to unmarshal json", err))
+			}
+			m.MetaSetMut(keyString, _map)
+		default:
+			return errors.New("unhandled metadata dictionary value")
+		}
+	}
+	return nil
 }
 
 // Close a processor.

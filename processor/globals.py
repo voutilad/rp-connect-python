@@ -64,3 +64,6 @@ class Root:
 
 # Pre-create an empty "root" instance for the user.
 root = Root()
+
+# For now, we'll use a native dict to capture possible metadata updates.
+meta = dict()
