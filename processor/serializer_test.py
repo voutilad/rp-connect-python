@@ -16,7 +16,7 @@ class FakeRoot:
     def to_dict(self):
         return self.data
 
-class SerializerTest(unittest.TestCase):
+class ProcessorSerializerTest(unittest.TestCase):
     """
     Tests for the serialization helper code.
     """

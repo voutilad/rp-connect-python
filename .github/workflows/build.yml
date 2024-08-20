@@ -28,7 +28,7 @@ jobs:
       run: CGO_ENABLED=0 go build
 
     - name: Run Go unit tests
-      run: go test -v ./internal/... ./processor/
+      run: go test -v ./internal/... ./processor/ ./input/
 
     - name: Run Python unit tests
       run: python -m unittest discover -v -s processor --pattern "*_test.py"

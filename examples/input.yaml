@@ -1,12 +1,12 @@
 input:
   python:
     exe: python3
-    name: data # set this to the python object that's providing the input data
+    name: g # set this to the python object that's providing the input data
     script: |
-      # Return a list or tuple
+      # Return a list or tuple.
       data = list(range(100))
 
-      # Or provide a function to call repeatedly until it returns None
+      # Or provide a function to call repeatedly until it returns None.
       def fetch(state={}):
         # Scope is funny. If you need modules in your function, import them
         # within the function.
