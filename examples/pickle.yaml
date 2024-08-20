@@ -1,0 +1,43 @@
+input:
+  python:
+    name: pickle_the_time
+    script: |
+      def pickle_the_time(state = {}):
+        import pickle
+        import time
+      
+        cnt = state.get("cnt", 0)
+        if cnt > 10:
+          # We're done.
+          return None
+        time.sleep(0.25)
+        now = time.ctime()
+      
+        d = {"now": now, "cnt": cnt}
+        state.update({"cnt": cnt + 1})
+
+        return pickle.dumps(d)
+
+pipeline:
+  processors:
+    - python:
+        mode: multi # pickle doesn't like legacy mode!?
+        script: |
+          import pickle
+          from hashlib import sha256
+
+          msg = content()
+          d = pickle.loads(msg)
+          d.update({"hash": sha256(msg).hexdigest()})
+
+          root = pickle.dumps(d)
+
+output:
+  python:
+    script: |
+      import pickle
+      
+      msg = content()
+      d = pickle.loads(msg)
+      print(d)
+

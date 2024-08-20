@@ -25,7 +25,7 @@ const (
 	GlobalMessageAddr = "__message_addr"
 )
 
-type pythonProcessor struct {
+type PythonProcessor struct {
 	logger       *service.Logger
 	runtime      python.Runtime
 	interpreters map[int64]*interpreter
@@ -49,7 +49,7 @@ type interpreter struct {
 	locals py.PyObjectPtr
 
 	// callbacks we've registered with the interpreter.
-	callbacks []*callback
+	callbacks []*python.Callback
 }
 
 // Python helper for initializing a `content` function, returning bytes from
@@ -97,7 +97,7 @@ func init() {
 				return nil, err
 			}
 
-			return newPythonProcessor(exe, script, python.StringAsMode(modeString), mgr.Logger())
+			return NewPythonProcessor(exe, script, python.StringAsMode(modeString), mgr.Logger())
 		})
 	if err != nil {
 		// There's no way to fail initialization. We must panic. :(
@@ -105,17 +105,17 @@ func init() {
 	}
 }
 
-// newPythonProcessor creates new Python processor instance with the provided
+// NewPythonProcessor creates new Python processor instance with the provided
 // configuration.
 //
 // This will create and initialize a new sub-interpreter from the main Python
 // Go routine and precompile some Python code objects.
-func newPythonProcessor(exe, script string, mode python.Mode, logger *service.Logger) (service.Processor, error) {
+func NewPythonProcessor(exe, script string, mode python.Mode, logger *service.Logger) (service.Processor, error) {
 	var err error
 	ctx := context.Background()
 
 	// Spin up our runtime.
-	var processor *pythonProcessor
+	var processor *PythonProcessor
 	switch mode {
 	case python.MultiMode:
 		processor, err = newMultiRuntimeProcessor(exe, logger)
@@ -160,11 +160,11 @@ func newPythonProcessor(exe, script string, mode python.Mode, logger *service.Lo
 		}
 
 		// Create our callback functions.
-		metadata, err := newCallback(GlobalMetadata, metadataCallback)
+		metadata, err := python.NewCallback(GlobalMetadata, metadataCallback)
 		if err != nil {
 			return err
 		}
-		content, err := newCallback(GlobalContent, contentCallback)
+		content, err := python.NewCallback(GlobalContent, contentCallback)
 		if err != nil {
 			return err
 		}
@@ -185,7 +185,7 @@ func newPythonProcessor(exe, script string, mode python.Mode, logger *service.Lo
 			jsonHelper:    jsonHelper,
 			globals:       globals,
 			locals:        locals,
-			callbacks:     []*callback{metadata, content},
+			callbacks:     []*python.Callback{metadata, content},
 		}
 		return nil
 	})
@@ -197,14 +197,14 @@ func newPythonProcessor(exe, script string, mode python.Mode, logger *service.Lo
 	return processor, nil
 }
 
-func newMultiRuntimeProcessor(exe string, logger *service.Logger) (*pythonProcessor, error) {
+func newMultiRuntimeProcessor(exe string, logger *service.Logger) (*PythonProcessor, error) {
 	cnt := runtime.NumCPU()
 	r, err := python.NewMultiInterpreterRuntime(exe, cnt, false, logger)
 	if err != nil {
 		return nil, err
 	}
 
-	p := pythonProcessor{
+	p := PythonProcessor{
 		logger:       logger,
 		runtime:      r,
 		interpreters: make(map[int64]*interpreter),
@@ -213,14 +213,14 @@ func newMultiRuntimeProcessor(exe string, logger *service.Logger) (*pythonProces
 	return &p, nil
 }
 
-func newLegacyRuntimeProcessor(exe string, logger *service.Logger) (*pythonProcessor, error) {
+func newLegacyRuntimeProcessor(exe string, logger *service.Logger) (*PythonProcessor, error) {
 	cnt := runtime.NumCPU()
 	r, err := python.NewMultiInterpreterRuntime(exe, cnt, true, logger)
 	if err != nil {
 		return nil, err
 	}
 
-	p := pythonProcessor{
+	p := PythonProcessor{
 		logger:       logger,
 		runtime:      r,
 		interpreters: make(map[int64]*interpreter),
@@ -229,13 +229,13 @@ func newLegacyRuntimeProcessor(exe string, logger *service.Logger) (*pythonProce
 	return &p, nil
 }
 
-func newSingleRuntimeProcessor(exe string, logger *service.Logger) (*pythonProcessor, error) {
+func newSingleRuntimeProcessor(exe string, logger *service.Logger) (*PythonProcessor, error) {
 	r, err := python.NewSingleInterpreterRuntime(exe, logger)
 	if err != nil {
 		return nil, err
 	}
 
-	p := pythonProcessor{
+	p := PythonProcessor{
 		logger:       logger,
 		runtime:      r,
 		interpreters: make(map[int64]*interpreter),
@@ -245,7 +245,7 @@ func newSingleRuntimeProcessor(exe string, logger *service.Logger) (*pythonProce
 }
 
 // Process a given Redpanda Connect service.Message using Python.
-func (p *pythonProcessor) Process(ctx context.Context, m *service.Message) (service.MessageBatch, error) {
+func (p *PythonProcessor) Process(ctx context.Context, m *service.Message) (service.MessageBatch, error) {
 	// Acquire an interpreter and look up our local state.
 	token, err := p.runtime.Acquire(ctx)
 	if err != nil {
@@ -473,7 +473,7 @@ func handleMeta(meta py.PyObjectPtr, m *service.Message, i *interpreter) error {
 // Close a processor.
 //
 // If we're the last Python Processor, ask the main Go routine to stop the runtime.
-func (p *pythonProcessor) Close(ctx context.Context) error {
+func (p *PythonProcessor) Close(ctx context.Context) error {
 	if p.alive.Add(-1) == 0 {
 		p.logger.Debug("Stopping all sub-interpreters for processor")
 		return p.runtime.Stop(ctx)

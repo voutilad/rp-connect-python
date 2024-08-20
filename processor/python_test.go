@@ -2,6 +2,7 @@ package processor
 
 import (
 	"github.com/redpanda-data/benthos/v4/public/service"
+	"github.com/voutilad/rp-connect-python/internal/impl/python"
 	"golang.org/x/net/context"
 	"testing"
 )
@@ -19,9 +20,9 @@ func TestDifferentInterpreterModes(t *testing.T) {
 		"other": 123,
 	}
 
-	for _, m := range []mode{MultiMode, LegacyMode, SingleMode} {
+	for _, m := range []python.Mode{python.MultiMode, python.LegacyMode, python.SingleMode} {
 		t.Run(string(m), func(t *testing.T) {
-			proc, err := newPythonProcessor("python3", script, m, nil)
+			proc, err := NewPythonProcessor("python3", script, m, nil)
 			if err != nil {
 				t.Fatal(err)
 			}

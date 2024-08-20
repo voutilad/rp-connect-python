@@ -1,36 +1,11 @@
 package processor
 
 import (
-	"errors"
 	"fmt"
-	"unsafe"
-
-	"github.com/ebitengine/purego"
 	"github.com/redpanda-data/benthos/v4/public/service"
 	py "github.com/voutilad/gogopython"
+	"unsafe"
 )
-
-type callbackFunc func(self, args py.PyObjectPtr) py.PyObjectPtr
-
-type callback struct {
-	Name       string
-	Definition *py.PyMethodDef
-	Object     py.PyObjectPtr
-}
-
-func newCallback(name string, f callbackFunc) (*callback, error) {
-	// TODO: push this into gogopython
-	def := py.PyMethodDef{
-		Name:   unsafe.StringData(name),
-		Flags:  py.MethodVarArgs,
-		Method: purego.NewCallback(f),
-	}
-	fn := py.PyCFunction_NewEx(&def, py.NullPyObjectPtr, py.NullPyObjectPtr)
-	if fn == py.NullPyObjectPtr {
-		return nil, errors.New("failed to create python function")
-	}
-	return &callback{Name: name, Definition: &def, Object: fn}, nil
-}
 
 // contentCallback is called from Python and copies the underlying bytes of
 // a service.Message into Python. It has a Python function definition like:

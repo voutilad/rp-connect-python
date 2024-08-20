@@ -1,0 +1,13 @@
+input:
+  generate:
+    count: 25
+    interval:
+    batch_size: 1
+    mapping: |
+      root = "hello world"
+
+output:
+  python:
+    script: |
+      msg = content().decode()
+      print(f"msg: {msg}")
