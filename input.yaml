@@ -1,7 +1,7 @@
 input:
   python:
     exe: python3
-    name: data
+    name: data # set this to the python object that's providing the input data
     script: |
       # Return a list or tuple
       data = list(range(100))
