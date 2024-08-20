@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"github.com/voutilad/rp-connect-python/internal/impl/python"
 	"runtime"
-	"strings"
 	"sync/atomic"
 	"unsafe"
 
@@ -25,28 +24,6 @@ const (
 	// GlobalMessageAddr points to a service.Message
 	GlobalMessageAddr = "__message_addr"
 )
-
-type mode string
-
-const (
-	MultiMode   mode = "multi"
-	SingleMode  mode = "single"
-	LegacyMode  mode = "legacy"
-	InvalidMode mode = "invalid"
-)
-
-func stringAsMode(s string) mode {
-	switch strings.ToLower(s) {
-	case string(MultiMode):
-		return MultiMode
-	case string(SingleMode):
-		return SingleMode
-	case string(LegacyMode):
-		return LegacyMode
-	default:
-		return InvalidMode
-	}
-}
 
 type pythonProcessor struct {
 	logger       *service.Logger
@@ -101,7 +78,7 @@ func init() {
 			Default("python3")).
 		Field(service.NewStringField("mode").
 			Description("Toggle different Python runtime modes: 'multi', 'single', and 'legacy' (the default)").
-			Default(string(LegacyMode)))
+			Default(string(python.LegacyMode)))
 	// TODO: linting rules for configuration fields
 
 	err := service.RegisterProcessor("python", configSpec,
@@ -120,7 +97,7 @@ func init() {
 				return nil, err
 			}
 
-			return newPythonProcessor(exe, script, stringAsMode(modeString), mgr.Logger())
+			return newPythonProcessor(exe, script, python.StringAsMode(modeString), mgr.Logger())
 		})
 	if err != nil {
 		// There's no way to fail initialization. We must panic. :(
@@ -133,18 +110,18 @@ func init() {
 //
 // This will create and initialize a new sub-interpreter from the main Python
 // Go routine and precompile some Python code objects.
-func newPythonProcessor(exe, script string, mode mode, logger *service.Logger) (service.Processor, error) {
+func newPythonProcessor(exe, script string, mode python.Mode, logger *service.Logger) (service.Processor, error) {
 	var err error
 	ctx := context.Background()
 
 	// Spin up our runtime.
 	var processor *pythonProcessor
 	switch mode {
-	case MultiMode:
+	case python.MultiMode:
 		processor, err = newMultiRuntimeProcessor(exe, logger)
-	case LegacyMode:
+	case python.LegacyMode:
 		processor, err = newLegacyRuntimeProcessor(exe, logger)
-	case SingleMode:
+	case python.SingleMode:
 		processor, err = newSingleRuntimeProcessor(exe, logger)
 	default:
 		return nil, errors.New("invalid mode")
