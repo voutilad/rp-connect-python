@@ -16,7 +16,6 @@ input:
         # retaining information across invocations. It's provided via kwargs,
         # so either need to have a named "state" arg or use python's kwargs.
         cnt = state.get("cnt", 0)
-        state.update({"cnt": cnt + 1})
         if cnt < 5:
           return requests.get("https://api.ipify.org").text
           state.update({"cnt": cnt + 1})
