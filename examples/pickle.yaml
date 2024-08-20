@@ -10,7 +10,7 @@ input:
         if cnt > 10:
           # We're done.
           return None
-        time.sleep(0.25)
+        time.sleep(0.1)
         now = time.ctime()
       
         d = {"now": now, "cnt": cnt}
