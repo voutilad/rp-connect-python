@@ -3,16 +3,12 @@ input:
     exe: python3
     name: data
     script: |
-      def read():
-        print("called!")
-      data = [1, 2, 3]
-      def genny():
-        yield "hey"
-      g = genny()
-
-pipeline:
-  processors:
-    - noop: {}
+      data = list(range(100))
+      def fetch():
+        import requests
+        import time
+        time.sleep(1)
+        return requests.get("https://api.ipify.org").text
 
 output:
   stdout: {}

@@ -2,9 +2,11 @@ package input
 
 import (
 	"context"
+	_ "embed"
 	"errors"
 	"fmt"
 	py "github.com/voutilad/gogopython"
+	"unsafe"
 
 	"github.com/redpanda-data/benthos/v4/public/service"
 	"github.com/voutilad/rp-connect-python/internal/impl/python"
@@ -19,6 +21,9 @@ const (
 	Tuple
 )
 
+//go:embed serializer.py
+var serializerScript string
+
 type pythonInput struct {
 	logger        *service.Logger
 	runtime       python.Runtime
@@ -28,6 +33,7 @@ type pythonInput struct {
 	globals       py.PyObjectPtr
 	locals        py.PyObjectPtr
 	code          py.PyCodeObjectPtr
+	serializer    py.PyCodeObjectPtr
 	script        string
 	generatorName string
 	ackName       string
@@ -141,13 +147,18 @@ func (p *pythonInput) Connect(ctx context.Context) error {
 
 		result := py.PyEval_EvalCode(code, p.globals, p.locals)
 		if result == py.NullPyObjectPtr {
+			py.PyErr_Print()
 			return errors.New("failed to evaluate input script")
 		}
 		defer py.Py_DecRef(result)
 
-		obj := py.PyDict_GetItemString(locals, p.generatorName)
+		obj := py.PyDict_GetItemString(p.locals, p.generatorName)
 		if obj == py.NullPyObjectPtr {
-			return errors.New(fmt.Sprintf("failed to find python data generator object '%s'", p.generatorName))
+			// Fallback to checking globals.
+			obj = py.PyDict_GetItemString(p.globals, p.generatorName)
+			if obj == py.NullPyObjectPtr {
+				return errors.New(fmt.Sprintf("failed to find python data generator object '%s'", p.generatorName))
+			}
 		}
 		switch t := py.BaseType(obj); t {
 		case py.Generator:
@@ -174,6 +185,13 @@ func (p *pythonInput) Connect(ctx context.Context) error {
 			}
 			p.ack = ack
 		}
+
+		serializer := py.Py_CompileString(serializerScript, "__json_helper__.py", py.PyFileInput)
+		if serializer == py.NullPyCodeObjectPtr {
+			return errors.New("failed to compile python serializer script")
+		}
+		p.serializer = serializer
+
 		return nil
 	})
 	if err != nil {
@@ -192,37 +210,37 @@ func (p *pythonInput) Read(ctx context.Context) (*service.Message, service.AckFu
 	defer func() { _ = p.runtime.Release(ticket) }()
 
 	err = p.runtime.Apply(ticket, ctx, func() error {
+		var next py.PyObjectPtr
+
 		// TODO: memoize function into a closure
 		switch p.mode {
 		case Iterable:
-			next := py.PyIter_Next(p.generator)
+			next = py.PyIter_Next(p.generator)
 			if next == py.NullPyObjectPtr {
 				return service.ErrEndOfInput
 			}
-			py.Py_DecRef(next)
-			m = service.NewMessage([]byte("generator blah"))
-			return nil
+			defer py.Py_DecRef(next)
 		case List:
-			next := py.PyList_GetItem(p.generator, int64(p.idx))
+			next = py.PyList_GetItem(p.generator, int64(p.idx))
 			p.idx++
 			if next == py.NullPyObjectPtr {
 				py.PyErr_Clear()
 				return service.ErrEndOfInput
 			}
-			m = service.NewMessage([]byte("list blah"))
-			return nil
 		case Tuple:
-			next := py.PyTuple_GetItem(p.generator, int64(p.idx))
+			next = py.PyTuple_GetItem(p.generator, int64(p.idx))
 			p.idx++
 			if next == py.NullPyObjectPtr {
 				py.PyErr_Clear()
 				return service.ErrEndOfInput
 			}
-			m = service.NewMessage([]byte("tuple blah"))
-			return nil
 		case Callable:
-			next := py.PyObject_CallObject(p.generator, py.NullPyObjectPtr)
+			empty := py.PyTuple_New(0)
+			py.PyErr_Clear()
+			next = py.PyObject_CallObject(p.generator, py.NullPyObjectPtr)
+			py.Py_DecRef(empty)
 			if next == py.NullPyObjectPtr {
+				py.PyErr_Print()
 				p.logger.Error("null result from calling python input function")
 				return service.ErrEndOfInput
 			}
@@ -230,10 +248,63 @@ func (p *pythonInput) Read(ctx context.Context) (*service.Message, service.AckFu
 				// No more work.
 				return service.ErrEndOfInput
 			}
-			m = service.NewMessage([]byte("function blah"))
-			return nil
+		default:
+			panic("unhandled input mode")
 		}
-		return service.ErrEndOfInput
+
+		switch py.BaseType(next) {
+		case py.None:
+			return service.ErrEndOfInput
+		case py.Long:
+			// TODO: overflow (signed vs. unsigned)
+			long := py.PyLong_AsLong(next)
+			m = service.NewMessage([]byte{})
+			m.SetStructured(long)
+		case py.Float:
+			float := py.PyFloat_AsDouble(next)
+			m = service.NewMessage([]byte{})
+			m.SetStructured(float)
+		case py.String:
+			s, err := py.UnicodeToString(next)
+			if err != nil {
+				p.logger.Error("failed to decode python input string")
+				return service.ErrEndOfInput
+			}
+			m = service.NewMessage([]byte(s))
+		case py.Bytes:
+			// Copy out the bytes.
+			bytes := py.PyBytes_AsString(next)
+			sz := py.PyBytes_Size(next)
+			buffer := make([]byte, sz)
+			copy(buffer, unsafe.Slice(bytes, sz))
+			m = service.NewMessage(buffer)
+		case py.Tuple, py.List, py.Dict:
+			// Use JSON serializer.
+			if py.PyDict_SetItemString(p.globals, "message", next) != 0 {
+				panic("failed to set message in globals dict")
+			}
+			result := py.PyEval_EvalCode(p.serializer, p.globals, p.locals)
+			if result == py.NullPyObjectPtr {
+				panic("unhandled serializer error: failed evaluation")
+			}
+			py.Py_DecRef(result)
+
+			result = py.PyDict_GetItemString(p.globals, "result")
+			if result == py.NullPyObjectPtr {
+				panic("unhandled serializer error: no result")
+			}
+			if py.BaseType(result) != py.Bytes {
+				panic("serializer produced something that's not bytes")
+			}
+
+			// Copy out the data.
+			sz := py.PyBytes_Size(result)
+			bytes := py.PyBytes_AsString(result)
+			buffer := make([]byte, sz)
+			copy(buffer, unsafe.Slice(bytes, sz))
+			m = service.NewMessage(buffer)
+		}
+		return nil
 	})
 
 	return m, func(ctx context.Context, err error) error { return nil }, err
