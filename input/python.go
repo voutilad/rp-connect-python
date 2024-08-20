@@ -34,6 +34,8 @@ type pythonInput struct {
 	locals        py.PyObjectPtr
 	code          py.PyCodeObjectPtr
 	serializer    py.PyCodeObjectPtr
+	args          py.PyObjectPtr
+	kwargs        py.PyObjectPtr
 	script        string
 	generatorName string
 	ackName       string
@@ -133,9 +135,19 @@ func (p *pythonInput) Connect(ctx context.Context) error {
 		if globals == py.NullPyObjectPtr {
 			return errors.New("failed to create new globals dict")
 		}
+		kwargs := py.PyDict_New()
+		if kwargs == py.NullPyObjectPtr {
+			return errors.New("failed to create new state dict")
+		}
+		args := py.PyTuple_New(0)
+		if args == py.NullPyObjectPtr {
+			return errors.New("failed to create new tuple")
+		}
 
 		p.locals = locals
 		p.globals = globals
+		p.args = args
+		p.kwargs = kwargs
 
 		// Compile our script and find our helpers.
 		code := py.Py_CompileString(p.script, "rp_connect_python_input.py", py.PyFileInput)
@@ -235,10 +247,8 @@ func (p *pythonInput) Read(ctx context.Context) (*service.Message, service.AckFu
 				return service.ErrEndOfInput
 			}
 		case Callable:
-			empty := py.PyTuple_New(0)
 			py.PyErr_Clear()
-			next = py.PyObject_CallObject(p.generator, py.NullPyObjectPtr)
-			py.Py_DecRef(empty)
+			next = py.PyObject_Call(p.generator, p.args, p.kwargs)
 			if next == py.NullPyObjectPtr {
 				py.PyErr_Print()
 				p.logger.Error("null result from calling python input function")
@@ -317,6 +327,8 @@ func (p *pythonInput) Close(ctx context.Context) error {
 		py.Py_DecRef(p.generator)
 		py.Py_DecRef(p.locals)
 		py.Py_DecRef(p.globals)
+		py.Py_DecRef(p.args)
+		py.Py_DecRef(p.kwargs)
 		return nil
 	})
 

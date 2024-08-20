@@ -3,12 +3,33 @@ input:
     exe: python3
     name: data
     script: |
+      # Return a list or tuple
       data = list(range(100))
-      def fetch():
+
+      # Or provide a function to call repeatedly until it returns None
+      def fetch(state={}):
+        # Scope is funny. If you need modules in your function, import them
+        # within the function.
         import requests
-        import time
-        time.sleep(1)
-        return requests.get("https://api.ipify.org").text
+
+        # Your function can optionally receive a state dictionary to use for
+        # retaining information across invocations. It's provided via kwargs,
+        # so either need to have a named "state" arg or use python's kwargs.
+        cnt = state.get("cnt", 0)
+        state.update({"cnt": cnt + 1})
+        if cnt < 5:
+          return requests.get("https://api.ipify.org").text
+          state.update({"cnt": cnt + 1})
+          print(f"... state={state}")
+        else:
+          return None
+
+      # Or provide an "iterable" in the form of a Python generator.
+      def f():
+        global data
+        for i in data:
+          yield i
+      g = f()
 
 output:
   stdout: {}
