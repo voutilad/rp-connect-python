@@ -16,18 +16,18 @@ class RootEncoder(json.JSONEncoder):
     def default(self, o):
         return o.to_dict()
 
-
 try:
     if root:
-        if type(root) is Root:
-            encoder = RootEncoder
-        else:
+        t = type(root)
+        if t is dict or t is list or t is tuple:
             encoder = None
+        else:
+            encoder = RootEncoder
         result = json.dumps(root, cls=encoder).encode()
 
-except NameError:
+except NameError as n:
     # 'root' isn't defined in our scope.
-    pass
+    raise n
 except (AttributeError, ValueError, RecursionError, TypeError):
     # Something amiss in json.dumps!
     result = None
@@ -35,6 +35,9 @@ except (AttributeError, ValueError, RecursionError, TypeError):
 try:
     if meta:
         meta_result = json.dumps(meta)
-except NameError:
+except NameError as n:
     # 'meta' not in our scope.
-    pass
+    raise n
+except (AttributeError, ValueError, RecursionError, TypeError):
+    # Something amiss in json.dumps!
+    meta_result = None

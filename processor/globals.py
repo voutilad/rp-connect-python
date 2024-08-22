@@ -1,9 +1,13 @@
 """
 Creates an environment similar to the one available in Bloblang.
 """
-global __content_callback      # our content callback function implemented in Go
-global __metadata_callback     # our metadata callback function implemented in Go
-global __message_addr # the virtual address of a service.Message
+def __noop(_x, _y):
+    raise Exception("callback not wired!")
+
+
+__content_callback = __noop   # our content callback function implemented in Go
+__metadata_callback = __noop  # our metadata callback function implemented in Go
+__message_addr = 0            # the virtual address of a service.Message
 
 def content():
     """
@@ -11,8 +15,6 @@ def content():
     from the message.
     :return: bytes
     """
-    global __content_callback
-    global __message_addr
     return __content_callback(__message_addr)
 
 
@@ -23,8 +25,6 @@ def metadata(key = ""):
     :param key: optional key for retrieving a particular metadata value.
     :return: metadata from Redpanda Connect
     """
-    global __metadata_callback
-    global __message_addr
     value = __metadata_callback(__message_addr, key)
     if value == "":
         # This is our "no such value for key" response.
@@ -62,8 +62,9 @@ class Root:
         """
         return self.__dict__
 
-# Pre-create an empty "root" instance for the user.
-root = Root()
-
-# For now, we'll use a native dict to capture possible metadata updates.
-meta = dict()
+    def clear(self):
+        """
+        Clear internal dictionary, resetting Root.
+        :return: None
+        """
+        self.__dict__.clear()

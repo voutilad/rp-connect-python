@@ -36,8 +36,10 @@ type interpreter struct {
 	// code is the compiled form of the Processor's Python script.
 	code py.PyCodeObjectPtr
 
-	// globalsHelper is the compiled form of globals.py.
-	globalsHelper py.PyCodeObjectPtr
+	// helperModule provides bloblang-style hooks like content()
+	helperModule py.PyObjectPtr
+	// helperCode is the compiled Python Code from helperModule
+	helperCode py.PyCodeObjectPtr
 
 	// jsonHelper is the compiled form of serializer.py.
 	jsonHelper py.PyCodeObjectPtr
@@ -47,6 +49,13 @@ type interpreter struct {
 
 	// locals is the Python local state. Should be cleared after each message.
 	locals py.PyObjectPtr
+
+	// root is our Bloblang-like Root instance.
+	root py.PyObjectPtr
+	// rootClear is the clear() method on our Root instance.
+	rootClear py.PyObjectPtr
+	// meta is our metadata dictionary.
+	meta py.PyObjectPtr
 
 	// callbacks we've registered with the interpreter.
 	callbacks []*python.Callback
@@ -146,14 +155,19 @@ func NewPythonProcessor(exe, script string, mode python.Mode, logger *service.Lo
 		}
 
 		// Pre-compile our script and helpers.
-		globalsHelper := py.Py_CompileString(globalHelperSrc, "__globals_helper__.py", py.PyFileInput)
-		if globalsHelper == py.NullPyCodeObjectPtr {
+		helperCode := py.Py_CompileString(globalHelperSrc, "__bloblang__.py", py.PyFileInput)
+		if helperCode == py.NullPyCodeObjectPtr {
 			py.PyErr_Print()
-			return errors.New("failed to compile python globals helper script")
+			return errors.New("failed to compile python helper script")
+		}
+		helperModule := py.PyImport_ExecCodeModule("__bloblang__", helperCode)
+		if helperModule == py.NullPyObjectPtr {
+			py.PyErr_Print()
+			return errors.New("failed to import python helper module")
 		}
 
 		// Pre-compile our serialization helper.
-		jsonHelper := py.Py_CompileString(jsonHelperSrc, "__json_helper__.py", py.PyFileInput)
+		jsonHelper := py.Py_CompileString(jsonHelperSrc, "__serializer__.py", py.PyFileInput)
 		if jsonHelper == py.NullPyCodeObjectPtr {
 			py.PyErr_Print()
 			return errors.New("failed to compile python JSON helper script")
@@ -164,28 +178,72 @@ func NewPythonProcessor(exe, script string, mode python.Mode, logger *service.Lo
 		if err != nil {
 			return err
 		}
+		py.PyModule_AddObjectRef(helperModule, GlobalMetadata, metadata.Object)
 		content, err := python.NewCallback(GlobalContent, contentCallback)
 		if err != nil {
 			return err
 		}
+		py.PyModule_AddObjectRef(helperModule, GlobalContent, content.Object)
+
+		// Prepare our Root instance and get a reference to it's clear method.
+		rootClass := py.PyObject_GetAttrString(helperModule, "Root")
+		if rootClass == py.NullPyObjectPtr {
+			py.PyErr_Print()
+			return errors.New("failed to find Root class in helper module")
+		}
+		root := py.PyObject_CallNoArgs(rootClass)
+		if root == py.NullPyObjectPtr {
+			py.PyErr_Print()
+			panic("failed to create new Root instance")
+		}
+		rootClear := py.PyObject_GetAttrString(root, "clear")
+		if rootClear == py.NullPyObjectPtr {
+			py.PyErr_Print()
+			panic("failed to find clear method on Root instance")
+		}
+		py.Py_DecRef(rootClass)
+
+		// Set up our main module and derive our globals from it.
+		main := py.PyImport_AddModule("__main__")
+		if main == py.NullPyObjectPtr {
+			return errors.New("failed to add __main__ module")
+		}
+		globals := py.PyModule_GetDict(main)
+		if globals == py.NullPyObjectPtr {
+			return errors.New("failed to create globals")
+		}
 
 		// Pre-populate globals.
-		globals := py.PyDict_New()
+		contentFn := py.PyObject_GetAttrString(helperModule, "content")
+		if contentFn == py.NullPyObjectPtr {
+			py.PyErr_Print()
+			return errors.New("failed to find content function in helper module")
+		}
+		py.PyDict_SetItemString(globals, "content", contentFn)
+		metadataFn := py.PyObject_GetAttrString(helperModule, "metadata")
+		if metadataFn == py.NullPyObjectPtr {
+			py.PyErr_Print()
+			return errors.New("failed to find metadata function in helper module")
+		}
+		py.PyDict_SetItemString(globals, "metadata", metadataFn)
+
+		// Wire in root and meta objects.
 		locals := py.PyDict_New()
-		if py.PyDict_SetItemString(globals, GlobalMetadata, metadata.Object) != 0 {
-			return errors.New("failed to set callback function in global mapping")
-		}
-		if py.PyDict_SetItemString(globals, GlobalContent, content.Object) != 0 {
-			return errors.New("failed to set callback function in global mapping")
-		}
+		meta := py.PyDict_New()
+		py.PyDict_SetItemString(locals, "root", root)
+		py.PyDict_SetItemString(locals, "meta", meta)
 
 		processor.interpreters[token.Id()] = &interpreter{
-			code:          code,
-			globalsHelper: globalsHelper,
-			jsonHelper:    jsonHelper,
-			globals:       globals,
-			locals:        locals,
-			callbacks:     []*python.Callback{metadata, content},
+			code:         code,
+			jsonHelper:   jsonHelper,
+			helperCode:   helperCode,
+			helperModule: helperModule,
+			root:         root,
+			rootClear:    rootClear,
+			meta:         meta,
+			globals:      globals,
+			locals:       locals,
+			callbacks:    []*python.Callback{metadata, content},
 		}
 		return nil
 	})
@@ -261,27 +319,20 @@ func (p *PythonProcessor) Process(ctx context.Context, m *service.Message) (serv
 
 	err = p.runtime.Apply(token, ctx, func() error {
 		// Clear out any local state from previous messages.
-		py.PyDict_Clear(i.locals)
+		py.PyDict_Clear(i.meta)
+		py.PyObject_CallNoArgs(i.rootClear)
 
 		// Set up our pointer to our service.Message.
 		addr := py.PyLong_FromUnsignedLong(uint64(uintptr(unsafe.Pointer(m))))
-		if py.PyDict_SetItemString(i.globals, GlobalMessageAddr, addr) != 0 {
+		if py.PyModule_AddObjectRef(i.helperModule, GlobalMessageAddr, addr) != 0 {
 			return errors.New("failed to set address of message")
 		}
 		py.Py_DecRef(addr)
 
-		// Pre-evaluate our global helpers.
-		result := py.PyEval_EvalCode(i.globalsHelper, i.globals, i.locals)
-		if result == py.NullPyObjectPtr {
-			// If we get here, something horrible has occurred and we cannot recover.
-			return errors.New("failed to evaluate global helper script")
-		}
-		py.Py_DecRef(result)
-
 		// Evaluate the Python script that was pre-compiled into a code object.
 		// It should have access to global helper functions/classes and should
 		// set a local called "root".
-		result = py.PyEval_EvalCode(i.code, i.globals, i.locals)
+		result := py.PyEval_EvalCode(i.code, i.globals, i.locals)
 		if result == py.NullPyObjectPtr {
 			py.PyErr_Print()
 			return errors.New("problem executing Python script")
@@ -350,6 +401,7 @@ func handleRoot(root py.PyObjectPtr, m *service.Message, i *interpreter) (drop b
 		// Convert to JSON for now with Python's help ;) because YOLO
 		result := py.PyEval_EvalCode(i.jsonHelper, i.globals, i.locals)
 		if result == py.NullPyObjectPtr {
+			py.PyErr_Print()
 			return false, errors.New("failed to JSON-ify root")
 		}
 		py.Py_DecRef(result)
@@ -358,7 +410,12 @@ func handleRoot(root py.PyObjectPtr, m *service.Message, i *interpreter) (drop b
 		// reference to the data.
 		resultBytes := py.PyDict_GetItemString(i.locals, "result")
 		if resultBytes == py.NullPyObjectPtr {
+			py.PyErr_Print()
+			panic("failed to get result")
 			return false, errors.New("failed to JSON-ify root: missing result")
+		}
+		if py.BaseType(resultBytes) != py.Bytes {
+			panic("expected serializer to return bytes")
 		}
 
 		// Before copying out, we need to know the length.
@@ -434,7 +491,7 @@ func handleMeta(meta py.PyObjectPtr, m *service.Message, i *interpreter) error {
 			locals := py.PyDict_New()
 			py.PyDict_SetItemString(locals, "meta", val)
 
-			result := py.PyEval_EvalCode(i.jsonHelper, i.globals, locals)
+			result := py.PyEval_EvalCode(i.jsonHelper, i.locals, locals)
 			if result == py.NullPyObjectPtr {
 				py.Py_DecRef(locals)
 				return errors.New("failed to JSON-ify metadata value")
@@ -445,6 +502,7 @@ func handleMeta(meta py.PyObjectPtr, m *service.Message, i *interpreter) error {
 			metaResult := py.PyDict_GetItemString(locals, "meta_result")
 			py.Py_DecRef(locals)
 			if metaResult == py.NullPyObjectPtr {
+				py.Py_DecRef(locals)
 				return errors.New("failed to JSON-ify root: missing result")
 			}
 

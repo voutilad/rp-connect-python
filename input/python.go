@@ -29,7 +29,6 @@ type pythonInput struct {
 	runtime       python.Runtime
 	generator     py.PyObjectPtr
 	mode          inputMode
-	ack           py.PyObjectPtr
 	globals       py.PyObjectPtr
 	locals        py.PyObjectPtr
 	code          py.PyCodeObjectPtr
@@ -38,7 +37,6 @@ type pythonInput struct {
 	kwargs        py.PyObjectPtr
 	script        string
 	generatorName string
-	ackName       string
 	idx           int
 }
 
@@ -52,9 +50,6 @@ var configSpec = service.NewConfigSpec().
 	Field(service.NewStringField("name").
 		Description("Name of python function to call for generating data.").
 		Default("read")).
-	Field(service.NewStringField("ack").
-		Description("Name of python function to call for acknowledging data.").
-		Default("")).
 	Field(service.NewStringField("mode").
 		Description("Toggle different Python runtime modes: 'multi', 'single', and 'legacy' (the default)").
 		Default(string(python.LegacyMode)))
@@ -79,12 +74,7 @@ func init() {
 			if err != nil {
 				return nil, err
 			}
-			ack, err := conf.FieldString("ack")
-			if err != nil {
-				return nil, err
-			}
-
-			return newPythonInput(exe, script, name, ack, python.StringAsMode(modeString), mgr.Logger())
+			return newPythonInput(exe, script, name, python.StringAsMode(modeString), mgr.Logger())
 		})
 
 	if err != nil {
@@ -92,7 +82,7 @@ func init() {
 	}
 }
 
-func newPythonInput(exe, script, name, ack string, mode python.Mode, logger *service.Logger) (service.Input, error) {
+func newPythonInput(exe, script, name string, mode python.Mode, logger *service.Logger) (service.Input, error) {
 	var err error
 	var r python.Runtime
 
@@ -116,7 +106,6 @@ func newPythonInput(exe, script, name, ack string, mode python.Mode, logger *ser
 		runtime:       r,
 		script:        script,
 		generatorName: name,
-		ackName:       ack,
 	}, nil
 }
 
@@ -131,10 +120,16 @@ func (p *pythonInput) Connect(ctx context.Context) error {
 		if locals == py.NullPyObjectPtr {
 			return errors.New("failed to create new locals dict")
 		}
-		globals := py.PyDict_New()
-		if globals == py.NullPyObjectPtr {
-			return errors.New("failed to create new globals dict")
+
+		main := py.PyImport_AddModule("__main__")
+		if main == py.NullPyObjectPtr {
+			return errors.New("failed to add __main__ module")
 		}
+		globals := py.PyModule_GetDict(main)
+		if globals == py.NullPyObjectPtr {
+			return errors.New("failed to create globals")
+		}
+
 		kwargs := py.PyDict_New()
 		if kwargs == py.NullPyObjectPtr {
 			return errors.New("failed to create new state dict")
@@ -185,18 +180,6 @@ func (p *pythonInput) Connect(ctx context.Context) error {
 			return errors.New(fmt.Sprintf("invalid python data generator object type '%s'", t.String()))
 		}
 		p.generator = obj
-
-		if p.ackName != "" {
-			ack := py.PyDict_GetItemString(locals, p.ackName)
-			if ack == py.NullPyObjectPtr {
-				return errors.New(fmt.Sprintf("failed to find python ack object '%s'", p.ackName))
-			}
-
-			if py.BaseType(ack) != py.Function {
-				return errors.New(fmt.Sprintf("python ack object '%s' is not callable", p.ackName))
-			}
-			p.ack = ack
-		}
 
 		serializer := py.Py_CompileString(serializerScript, "__json_helper__.py", py.PyFileInput)
 		if serializer == py.NullPyCodeObjectPtr {
@@ -323,7 +306,6 @@ func (p *pythonInput) Read(ctx context.Context) (*service.Message, service.AckFu
 func (p *pythonInput) Close(ctx context.Context) error {
 	_ = p.runtime.Map(ctx, func(_ *python.InterpreterTicket) error {
 		// Even if one of these are null, Py_DecRef is fine being passed NULL.
-		py.Py_DecRef(p.ack)
 		py.Py_DecRef(p.generator)
 		py.Py_DecRef(p.locals)
 		py.Py_DecRef(p.globals)
