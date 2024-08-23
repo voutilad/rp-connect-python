@@ -10,7 +10,6 @@ pipeline:
     - python:
         script: |
           import pickle
-          from examples.input.widget import Widget
           widget = pickle.loads(content())
           root = str(widget)
 output:
