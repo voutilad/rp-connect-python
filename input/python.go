@@ -17,8 +17,9 @@ type inputMode int
 const (
 	Callable inputMode = iota // Callable acts like a Python function.
 	Iterable                  // Iterable acts like a Python iterable or generator.
-	List
-	Tuple
+	List                      // A Python List.
+	Tuple                     // A Python Tuple.
+	Object                    // A single Python Object.
 )
 
 type pythonInput struct {
@@ -166,7 +167,7 @@ func (p *pythonInput) Connect(ctx context.Context) error {
 		case py.Function:
 			p.mode = Callable
 		default:
-			return errors.New(fmt.Sprintf("invalid python data generator object type '%s'", t.String()))
+			p.mode = Object
 		}
 		p.generator = obj
 
@@ -197,6 +198,14 @@ func (p *pythonInput) Read(ctx context.Context) (*service.Message, service.AckFu
 		var next py.PyObjectPtr
 
 		switch p.mode {
+		case Object:
+			if p.idx > 0 {
+				// Only process an object once.
+				return service.ErrEndOfInput
+			}
+			next = p.generator
+			p.idx++
+
 		case Iterable:
 			next = py.PyIter_Next(p.generator)
 			if next == py.NullPyObjectPtr {
