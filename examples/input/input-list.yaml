@@ -1,0 +1,11 @@
+input:
+  python:
+    exe: python3
+    name: data
+    script: |
+      # You can use a list or tuple as the data generator.
+      data = list(range(10))
+output:
+  stdout: {}
+logger:
+  level: OFF

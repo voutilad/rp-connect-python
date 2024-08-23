@@ -27,7 +27,6 @@ type pythonInput struct {
 	generator     py.PyObjectPtr
 	mode          inputMode
 	globals       py.PyObjectPtr
-	locals        py.PyObjectPtr
 	code          py.PyCodeObjectPtr
 	serializer    *python.Serializer
 	args          py.PyObjectPtr
@@ -113,11 +112,6 @@ func (p *pythonInput) Connect(ctx context.Context) error {
 	}
 
 	err = p.runtime.Map(ctx, func(_ *python.InterpreterTicket) error {
-		locals := py.PyDict_New()
-		if locals == py.NullPyObjectPtr {
-			return errors.New("failed to create new locals dict")
-		}
-
 		main := py.PyImport_AddModule("__main__")
 		if main == py.NullPyObjectPtr {
 			return errors.New("failed to add __main__ module")
@@ -136,7 +130,6 @@ func (p *pythonInput) Connect(ctx context.Context) error {
 			return errors.New("failed to create new tuple")
 		}
 
-		p.locals = locals
 		p.globals = globals
 		p.args = args
 		p.kwargs = kwargs
@@ -149,21 +142,20 @@ func (p *pythonInput) Connect(ctx context.Context) error {
 		}
 		p.code = code
 
-		result := py.PyEval_EvalCode(code, p.globals, p.locals)
+		// Execute the script to establish our data generating object.
+		result := py.PyEval_EvalCode(code, p.globals, py.NullPyObjectPtr)
 		if result == py.NullPyObjectPtr {
 			py.PyErr_Print()
 			return errors.New("failed to evaluate input script")
 		}
 		defer py.Py_DecRef(result)
 
-		obj := py.PyDict_GetItemString(p.locals, p.generatorName)
+		// Find our data generator.
+		obj := py.PyDict_GetItemString(p.globals, p.generatorName)
 		if obj == py.NullPyObjectPtr {
-			// Fallback to checking globals.
-			obj = py.PyDict_GetItemString(p.globals, p.generatorName)
-			if obj == py.NullPyObjectPtr {
-				return errors.New(fmt.Sprintf("failed to find python data generator object '%s'", p.generatorName))
-			}
+			return errors.New(fmt.Sprintf("failed to find python data generator object '%s'", p.generatorName))
 		}
+
 		switch t := py.BaseType(obj); t {
 		case py.Generator:
 			p.mode = Iterable
@@ -180,7 +172,7 @@ func (p *pythonInput) Connect(ctx context.Context) error {
 
 		serializer, err := python.NewSerializer()
 		if err != nil {
-			panic(err)
+			return err
 		}
 		p.serializer = serializer
 
@@ -204,7 +196,6 @@ func (p *pythonInput) Read(ctx context.Context) (*service.Message, service.AckFu
 	err = p.runtime.Apply(ticket, ctx, func() error {
 		var next py.PyObjectPtr
 
-		// TODO: memoize function into a closure
 		switch p.mode {
 		case Iterable:
 			next = py.PyIter_Next(p.generator)
@@ -291,10 +282,10 @@ func (p *pythonInput) Close(ctx context.Context) error {
 	_ = p.runtime.Map(ctx, func(_ *python.InterpreterTicket) error {
 		// Even if one of these are null, Py_DecRef is fine being passed NULL.
 		py.Py_DecRef(p.generator)
-		py.Py_DecRef(p.locals)
 		py.Py_DecRef(p.globals)
 		py.Py_DecRef(p.args)
 		py.Py_DecRef(p.kwargs)
+		p.serializer.DecRef()
 		return nil
 	})
 
