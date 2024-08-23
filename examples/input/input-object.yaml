@@ -1,0 +1,9 @@
+input:
+  python:
+    name: data
+    script: |
+      data = "Dave"
+output:
+  stdout: {}
+logger:
+  level: OFF
