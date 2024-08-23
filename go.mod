@@ -6,7 +6,7 @@ require (
 	github.com/ebitengine/purego v0.8.0-alpha.4
 	github.com/redpanda-data/benthos/v4 v4.35.0
 	github.com/redpanda-data/connect/public/bundle/free/v4 v4.31.0
-	github.com/voutilad/gogopython v0.15.0
+	github.com/voutilad/gogopython v0.16.0
 	golang.org/x/net v0.28.0
 )
 

@@ -41,8 +41,8 @@ type interpreter struct {
 	// helperCode is the compiled Python Code from helperModule
 	helperCode py.PyCodeObjectPtr
 
-	// jsonHelper is the compiled form of serializer.py.
-	jsonHelper py.PyCodeObjectPtr
+	// Our serializer helper.
+	serializer *python.Serializer
 
 	// globals is the Python globals we use for injecting state.
 	globals py.PyObjectPtr
@@ -53,7 +53,10 @@ type interpreter struct {
 	// root is our Bloblang-like Root instance.
 	root py.PyObjectPtr
 	// rootClear is the clear() method on our Root instance.
-	rootClear py.PyObjectPtr
+	rootClear  py.PyObjectPtr
+	rootClass  py.PyObjectPtr
+	rootToDict py.PyObjectPtr
+
 	// meta is our metadata dictionary.
 	meta py.PyObjectPtr
 
@@ -66,11 +69,6 @@ type interpreter struct {
 //
 //go:embed globals.py
 var globalHelperSrc string
-
-// Python helper for serializing the "result" of a processor.
-//
-//go:embed serializer.py
-var jsonHelperSrc string
 
 // Initialize the Python processor Redpanda Connect module.
 //
@@ -166,13 +164,6 @@ func NewPythonProcessor(exe, script string, mode python.Mode, logger *service.Lo
 			return errors.New("failed to import python helper module")
 		}
 
-		// Pre-compile our serialization helper.
-		jsonHelper := py.Py_CompileString(jsonHelperSrc, "__serializer__.py", py.PyFileInput)
-		if jsonHelper == py.NullPyCodeObjectPtr {
-			py.PyErr_Print()
-			return errors.New("failed to compile python JSON helper script")
-		}
-
 		// Create our callback functions.
 		metadata, err := python.NewCallback(GlobalMetadata, metadataCallback)
 		if err != nil {
@@ -201,7 +192,11 @@ func NewPythonProcessor(exe, script string, mode python.Mode, logger *service.Lo
 			py.PyErr_Print()
 			panic("failed to find clear method on Root instance")
 		}
-		py.Py_DecRef(rootClass)
+		rootToDict := py.PyObject_GetAttrString(root, "to_dict")
+		if rootToDict == py.NullPyObjectPtr {
+			py.PyErr_Print()
+			panic("failed to find to_dict method on Root instance")
+		}
 
 		// Set up our main module and derive our globals from it.
 		main := py.PyImport_AddModule("__main__")
@@ -231,16 +226,24 @@ func NewPythonProcessor(exe, script string, mode python.Mode, logger *service.Lo
 		locals := py.PyDict_New()
 		meta := py.PyDict_New()
 
+		// Create our serializer.
+		serializer, err := python.NewSerializer()
+		if err != nil {
+			return err
+		}
+
 		processor.interpreters[token.Id()] = &interpreter{
 			code:         code,
-			jsonHelper:   jsonHelper,
 			helperCode:   helperCode,
 			helperModule: helperModule,
 			root:         root,
+			rootClass:    rootClass,
 			rootClear:    rootClear,
+			rootToDict:   rootToDict,
 			meta:         meta,
 			globals:      globals,
 			locals:       locals,
+			serializer:   serializer,
 			callbacks:    []*python.Callback{metadata, content},
 		}
 		return nil
@@ -404,33 +407,20 @@ func handleRoot(root py.PyObjectPtr, m *service.Message, i *interpreter) (drop b
 		// We'll try serializing this to JSON. It could be a Root type.
 		fallthrough
 	case py.Tuple, py.List, py.Dict:
-		// Convert to JSON for now with Python's help ;) because YOLO
-		result := py.PyEval_EvalCode(i.jsonHelper, i.globals, i.locals)
-		if result == py.NullPyObjectPtr {
-			py.PyErr_Print()
-			return false, errors.New("failed to JSON-ify root")
+		// Convert to JSON bytes for now with Python's help ;) because YOLO
+		dict := root
+		if py.PyObject_IsInstance(root, i.rootClass) == 1 {
+			// We need to convert to a dict first.
+			dict = py.PyObject_CallNoArgs(i.rootToDict)
+			if dict == py.NullPyObjectPtr {
+				py.PyErr_Print()
+				panic("failed to convert root object to a dict")
+			}
 		}
-		py.Py_DecRef(result)
-
-		// The "result" should now be JSON as utf8 bytes. Get a weak
-		// reference to the data.
-		resultBytes := py.PyDict_GetItemString(i.locals, "result")
-		if resultBytes == py.NullPyObjectPtr {
-			py.PyErr_Print()
-			panic("failed to get result")
-			return false, errors.New("failed to JSON-ify root: missing result")
+		buffer, err := i.serializer.JsonBytes(dict)
+		if err != nil {
+			panic(err)
 		}
-		if py.BaseType(resultBytes) != py.Bytes {
-			panic("expected serializer to return bytes")
-		}
-
-		// Before copying out, we need to know the length.
-		sz := py.PyBytes_Size(resultBytes)
-		rawBytes := py.PyBytes_AsString(resultBytes)
-
-		// Copy the data out from Python land into Redpanda Connect.
-		buffer := make([]byte, sz)
-		copy(buffer, unsafe.Slice(rawBytes, sz))
 		m.SetBytes(buffer)
 	}
 	return false, nil
@@ -492,30 +482,10 @@ func handleMeta(meta py.PyObjectPtr, m *service.Message, i *interpreter) error {
 			float := py.PyFloat_AsDouble(val)
 			m.MetaSetMut(keyString, float)
 		case py.Tuple, py.List, py.Dict:
-			// We need to use a new local state to not clobber the dict we're
-			// iterating over already.
-			locals := py.PyDict_New()
-			py.PyDict_SetItemString(locals, "meta", val)
-
-			result := py.PyEval_EvalCode(i.jsonHelper, i.locals, locals)
-			if result == py.NullPyObjectPtr {
-				py.Py_DecRef(locals)
-				return errors.New("failed to JSON-ify metadata value")
-			}
-			py.Py_DecRef(result)
-
-			// The "result" should now be JSON as utf8.
-			metaResult := py.PyDict_GetItemString(locals, "meta_result")
-			py.Py_DecRef(locals)
-			if metaResult == py.NullPyObjectPtr {
-				py.Py_DecRef(locals)
-				return errors.New("failed to JSON-ify root: missing result")
-			}
-
-			// Before copying out, we need to know the length.
-			str, err := py.UnicodeToString(metaResult)
+			// Convert to a JSON string
+			str, err := i.serializer.JsonString(val)
 			if err != nil {
-				panic("failed to decode meta_result, should be a Python string")
+				panic(err)
 			}
 
 			// XXX unmarshal the JSON back into Go objects using the json
