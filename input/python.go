@@ -21,9 +21,6 @@ const (
 	Tuple
 )
 
-//go:embed serializer.py
-var serializerScript string
-
 type pythonInput struct {
 	logger        *service.Logger
 	runtime       python.Runtime
@@ -32,7 +29,7 @@ type pythonInput struct {
 	globals       py.PyObjectPtr
 	locals        py.PyObjectPtr
 	code          py.PyCodeObjectPtr
-	serializer    py.PyCodeObjectPtr
+	serializer    *python.Serializer
 	args          py.PyObjectPtr
 	kwargs        py.PyObjectPtr
 	script        string
@@ -181,9 +178,9 @@ func (p *pythonInput) Connect(ctx context.Context) error {
 		}
 		p.generator = obj
 
-		serializer := py.Py_CompileString(serializerScript, "__json_helper__.py", py.PyFileInput)
-		if serializer == py.NullPyCodeObjectPtr {
-			return errors.New("failed to compile python serializer script")
+		serializer, err := python.NewSerializer()
+		if err != nil {
+			panic(err)
 		}
 		p.serializer = serializer
 
@@ -248,15 +245,18 @@ func (p *pythonInput) Read(ctx context.Context) (*service.Message, service.AckFu
 		switch py.BaseType(next) {
 		case py.None:
 			return service.ErrEndOfInput
+
 		case py.Long:
 			// TODO: overflow (signed vs. unsigned)
 			long := py.PyLong_AsLong(next)
 			m = service.NewMessage([]byte{})
 			m.SetStructured(long)
+
 		case py.Float:
 			float := py.PyFloat_AsDouble(next)
 			m = service.NewMessage([]byte{})
 			m.SetStructured(float)
+
 		case py.String:
 			s, err := py.UnicodeToString(next)
 			if err != nil {
@@ -264,6 +264,7 @@ func (p *pythonInput) Read(ctx context.Context) (*service.Message, service.AckFu
 				return service.ErrEndOfInput
 			}
 			m = service.NewMessage([]byte(s))
+
 		case py.Bytes:
 			// Copy out the bytes.
 			bytes := py.PyBytes_AsString(next)
@@ -271,30 +272,13 @@ func (p *pythonInput) Read(ctx context.Context) (*service.Message, service.AckFu
 			buffer := make([]byte, sz)
 			copy(buffer, unsafe.Slice(bytes, sz))
 			m = service.NewMessage(buffer)
-		case py.Tuple, py.List, py.Dict:
+
+		case py.Tuple, py.List, py.Dict, py.Unknown:
 			// Use JSON serializer.
-			if py.PyDict_SetItemString(p.globals, "message", next) != 0 {
-				panic("failed to set message in globals dict")
+			buffer, err := p.serializer.JsonBytes(next)
+			if err != nil {
+				panic(err)
 			}
-			result := py.PyEval_EvalCode(p.serializer, p.globals, p.locals)
-			if result == py.NullPyObjectPtr {
-				panic("unhandled serializer error: failed evaluation")
-			}
-			py.Py_DecRef(result)
-
-			result = py.PyDict_GetItemString(p.globals, "result")
-			if result == py.NullPyObjectPtr {
-				panic("unhandled serializer error: no result")
-			}
-			if py.BaseType(result) != py.Bytes {
-				panic("serializer produced something that's not bytes")
-			}
-
-			// Copy out the data.
-			sz := py.PyBytes_Size(result)
-			bytes := py.PyBytes_AsString(result)
-			buffer := make([]byte, sz)
-			copy(buffer, unsafe.Slice(bytes, sz))
 			m = service.NewMessage(buffer)
 		}
 		return nil
