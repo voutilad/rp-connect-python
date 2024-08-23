@@ -1,0 +1,19 @@
+input:
+  python:
+    name: widget
+    pickle: true
+    script: |
+      from examples.input.widget import Widget
+      widget = Widget(123)
+pipeline:
+  processors:
+    - python:
+        script: |
+          import pickle
+          from examples.input.widget import Widget
+          widget = pickle.loads(content())
+          root = str(widget)
+output:
+  stdout: {}
+logger:
+  level: OFF

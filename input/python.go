@@ -32,6 +32,7 @@ type pythonInput struct {
 	serializer    *python.Serializer
 	args          py.PyObjectPtr
 	kwargs        py.PyObjectPtr
+	pickle        bool
 	script        string
 	generatorName string
 	idx           int
@@ -47,6 +48,9 @@ var configSpec = service.NewConfigSpec().
 	Field(service.NewStringField("name").
 		Description("Name of python function to call for generating data.").
 		Default("read")).
+	Field(service.NewBoolField("pickle").
+		Description("Whether to serialize data with pickle.").
+		Default(false)).
 	Field(service.NewStringField("mode").
 		Description("Toggle different Python runtime modes: 'multi', 'single', and 'legacy' (the default)").
 		Default(string(python.LegacyMode)))
@@ -71,7 +75,11 @@ func init() {
 			if err != nil {
 				return nil, err
 			}
-			return newPythonInput(exe, script, name, python.StringAsMode(modeString), mgr.Logger())
+			pickle, err := conf.FieldBool("pickle")
+			if err != nil {
+				return nil, err
+			}
+			return newPythonInput(exe, script, name, pickle, python.StringAsMode(modeString), mgr.Logger())
 		})
 
 	if err != nil {
@@ -79,7 +87,7 @@ func init() {
 	}
 }
 
-func newPythonInput(exe, script, name string, mode python.Mode, logger *service.Logger) (service.Input, error) {
+func newPythonInput(exe, script, name string, pickle bool, mode python.Mode, logger *service.Logger) (service.Input, error) {
 	var err error
 	var r python.Runtime
 
@@ -103,6 +111,7 @@ func newPythonInput(exe, script, name string, mode python.Mode, logger *service.
 		runtime:       r,
 		script:        script,
 		generatorName: name,
+		pickle:        pickle,
 	}, nil
 }
 
@@ -278,8 +287,13 @@ func (p *pythonInput) Read(ctx context.Context) (*service.Message, service.AckFu
 			m = service.NewMessage(buffer)
 
 		case py.Tuple, py.List, py.Dict, py.Unknown:
-			// Use JSON serializer.
-			buffer, err := p.serializer.JsonBytes(next)
+			// Use the serializer.
+			var buffer []byte
+			if p.pickle {
+				buffer, err = p.serializer.Pickle(next)
+			} else {
+				buffer, err = p.serializer.JsonBytes(next)
+			}
 			if err != nil {
 				panic(err)
 			}
