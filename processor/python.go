@@ -230,8 +230,6 @@ func NewPythonProcessor(exe, script string, mode python.Mode, logger *service.Lo
 		// Wire in root and meta objects.
 		locals := py.PyDict_New()
 		meta := py.PyDict_New()
-		py.PyDict_SetItemString(locals, "root", root)
-		py.PyDict_SetItemString(locals, "meta", meta)
 
 		processor.interpreters[token.Id()] = &interpreter{
 			code:         code,
@@ -322,6 +320,9 @@ func (p *PythonProcessor) Process(ctx context.Context, m *service.Message) (serv
 		py.PyDict_Clear(i.meta)
 		py.PyObject_CallNoArgs(i.rootClear)
 
+		py.PyDict_SetItemString(i.locals, "root", i.root)
+		py.PyDict_SetItemString(i.locals, "meta", i.meta)
+
 		// Set up our pointer to our service.Message.
 		addr := py.PyLong_FromUnsignedLong(uint64(uintptr(unsafe.Pointer(m))))
 		if py.PyModule_AddObjectRef(i.helperModule, GlobalMessageAddr, addr) != 0 {
@@ -349,11 +350,16 @@ func (p *PythonProcessor) Process(ctx context.Context, m *service.Message) (serv
 		if drop {
 			batch = []*service.Message{}
 		}
+		if err != nil {
+			return err
+		}
 
 		// The user might have modified the "meta" mapping to set new metadata
 		// on the message.
 		meta := py.PyDict_GetItemString(i.locals, "meta")
 		if meta != py.NullPyObjectPtr {
+			// XXX If meta is re-assigned and _not_ a dictionary, we error but
+			// keep running. Not sure best approach yet.
 			err = handleMeta(meta, m, i)
 		}
 		return err
