@@ -61,18 +61,17 @@ func (r *MultiInterpreterRuntime) Start(ctx context.Context) error {
 	defer globalMtx.Unlock()
 
 	if !r.started {
-		runtime.LockOSThread()
-		defer runtime.UnlockOSThread()
-
-		r.thread, err = loadPython(r.exe, r.home, r.paths)
-		if err != nil {
+		r.thread, err = loadPython(r.exe, r.home, r.paths, ctx)
+		if err != nil || r.thread == py.NullThreadState {
 			r.logger.Errorf("Failed to start Python interpreter.")
 			return err
 		}
 		r.logger.Debug("Python interpreter started.")
 
+		runtime.LockOSThread()
 		// Start up sub-interpreters.
 		for idx := range len(r.interpreters) {
+			py.PyEval_RestoreThread(r.thread)
 			sub, err := r.initSubInterpreter()
 			if err != nil {
 				r.logger.Error("Failed to create new sub-interpreter.")
@@ -84,6 +83,8 @@ func (r *MultiInterpreterRuntime) Start(ctx context.Context) error {
 			r.tickets <- &InterpreterTicket{idx: idx, id: sub.id}
 			r.logger.Tracef("Initialized sub-interpreter %d.\n", sub.id)
 		}
+		runtime.UnlockOSThread()
+
 		r.started = true
 		r.logger.Debugf("Started %d sub-interpreters.", len(r.tickets))
 	}
@@ -129,7 +130,7 @@ func (r *MultiInterpreterRuntime) Stop(ctx context.Context) error {
 	}
 
 	// Tear down the runtime.
-	err = unloadPython(r.thread)
+	err = unloadPython(ctx)
 	if err != nil {
 		return err
 	}
@@ -226,8 +227,7 @@ func (r *MultiInterpreterRuntime) Map(ctx context.Context, f func(t *Interpreter
 
 // Initialize a Sub-interpreter.
 //
-// Relies on global Python state and being run only from the OS thread that
-// manages the runtime. Will potentially panic otherwise.
+// Caller must have the main interpreter state loaded and Go routine pinned.
 func (r *MultiInterpreterRuntime) initSubInterpreter() (*subInterpreter, error) {
 	// Some of these args are required if we want to use Numpy, etc.
 	var ts py.PyThreadStatePtr

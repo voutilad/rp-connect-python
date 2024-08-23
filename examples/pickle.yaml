@@ -1,6 +1,7 @@
 input:
   python:
     name: pickle_the_time
+    pickle: true
     script: |
       def pickle_the_time(state = {}):
         import pickle
@@ -15,8 +16,7 @@ input:
       
         d = {"now": now, "cnt": cnt}
         state.update({"cnt": cnt + 1})
-
-        return pickle.dumps(d)
+        return d
 
 pipeline:
   processors:

@@ -16,10 +16,9 @@ type SingleInterpreterRuntime struct {
 	exe     string
 	home    string
 	paths   []string
-	mtxChan chan int
 	thread  py.PyThreadStatePtr
 	ticket  InterpreterTicket // SingleInterpreterRuntime uses a single ticket.
-	started bool
+	started bool              // protected by globalMtx in runtime.go
 	logger  *service.Logger
 }
 
@@ -30,11 +29,10 @@ func NewSingleInterpreterRuntime(exe string, logger *service.Logger) (*SingleInt
 	}
 
 	return &SingleInterpreterRuntime{
-		exe:     exe,
-		home:    home,
-		paths:   paths,
-		mtxChan: make(chan int, 1),
-		logger:  logger,
+		exe:    exe,
+		home:   home,
+		paths:  paths,
+		logger: logger,
 		ticket: InterpreterTicket{
 			id: -1,
 		},
@@ -53,9 +51,7 @@ func (r *SingleInterpreterRuntime) Start(ctx context.Context) error {
 		return nil
 	}
 
-	runtime.LockOSThread()
-	ts, err := loadPython(r.exe, r.home, r.paths)
-	runtime.UnlockOSThread()
+	ts, err := loadPython(r.exe, r.home, r.paths, ctx)
 	if err != nil {
 		return err
 	}
@@ -63,6 +59,7 @@ func (r *SingleInterpreterRuntime) Start(ctx context.Context) error {
 	r.thread = ts
 	r.ticket.cookie = uintptr(unsafe.Pointer(r))
 	r.started = true
+	r.logger.Debug("Python single runtime interpreter started.")
 
 	return nil
 }
@@ -74,16 +71,13 @@ func (r *SingleInterpreterRuntime) Stop(ctx context.Context) error {
 	}
 	defer globalMtx.Unlock()
 
-	runtime.LockOSThread()
-	err = unloadPython(r.thread)
-	runtime.UnlockOSThread()
-
+	err = unloadPython(ctx)
 	r.thread = py.NullThreadState
 	r.ticket.cookie = 0 // NULL
 	r.started = false
 
 	if err == nil {
-		r.logger.Debug("Python main interpreter stopped.")
+		r.logger.Debug("Python single runtime interpreter stopped.")
 	} else {
 		r.logger.Warn("Failure while stopping interpreter. Runtime left in undefined state.")
 	}

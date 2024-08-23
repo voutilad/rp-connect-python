@@ -6,7 +6,6 @@ import (
 	py "github.com/voutilad/gogopython"
 	"runtime"
 	"strings"
-	"sync"
 )
 
 // globalMtx guards the global Python program logic as only a single Python
@@ -19,6 +18,8 @@ var globalMtx *ContextAwareMutex
 // Protected by globalMtx.
 var pythonLoaded = false
 
+var pythonStarted = false
+
 // pythonExe contains the unique executable name used for finding the
 // currently used Python implementation.
 //
@@ -30,12 +31,19 @@ var pythonExe = ""
 // Protected by globalMtx.
 var pythonMain py.PyThreadStatePtr
 
-// mainWg tracks the number of existing runtime consumers.
-var mainWg *sync.WaitGroup
+type config struct {
+	home  string
+	paths []string
+}
+
+var consumersCnt = 0                      // Number of current consumers. Protected by globalMtx.
+var chanToMain chan *config               // Channel for sending pointers to main go routine.
+var chanFromMain chan py.PyThreadStatePtr // Channel for receiving response from main go routine.
 
 func init() {
 	globalMtx = NewContextAwareMutex()
-	mainWg = &sync.WaitGroup{}
+	chanToMain = make(chan *config)
+	chanFromMain = make(chan py.PyThreadStatePtr)
 }
 
 // An InterpreterTicket represents ownership of the interpreter of a particular
@@ -85,24 +93,24 @@ type Runtime interface {
 // On failure, returns a null PyThreadStatePtr and an error.
 //
 // Must be called globalMtx and the OS thread locked.
-func loadPython(exe, home string, paths []string) (py.PyThreadStatePtr, error) {
+func loadPython(exe, home string, paths []string, ctx context.Context) (py.PyThreadStatePtr, error) {
 	globalMtx.AssertLocked()
 
 	// It's ok if we're starting another instance of the same executable, but
 	// we don't want to re-load the libraries as we'll crash.
 	if exe != pythonExe && pythonLoaded {
-		return py.NullThreadState, errors.New("python was already initialized")
-	} else if pythonLoaded {
-		// New consumer. Increment wait group.
-		mainWg.Add(1)
-		return pythonMain, nil
+		panic("python was already initialized with a different implementation")
+		//return py.NullThreadState,
+		//	errors.New("python was already initialized with a different implementation")
 	}
 
-	// Load our dynamic libraries.
+	// Load our dynamic libraries. This should happen only once per process
+	// lifetime.
 	if !pythonLoaded {
 		err := py.Load_library(exe)
 		if err != nil {
-			return py.NullThreadState, err
+			panic(err)
+			// return py.NullThreadState, err
 		}
 
 		// From now on, we're considered "loaded."
@@ -110,12 +118,59 @@ func loadPython(exe, home string, paths []string) (py.PyThreadStatePtr, error) {
 		pythonExe = exe
 	}
 
-	// Our initial state.
-	mainWg.Add(1)
+	// Launch the main interpreter.
+	launchOnce()
 
-	// We launch a dedicated Go routine for managing the starting and stopping
-	// of the main interpreter.
-	tsChan := make(chan py.PyThreadStatePtr)
+	// Increment our consumer count.
+	consumersCnt++
+
+	// If we're the first consumer, we're responsible for kicking it off.
+	if consumersCnt == 1 {
+		config := &config{
+			home:  home,
+			paths: paths,
+		}
+		select {
+		case chanToMain <- config:
+			// nop
+		case <-ctx.Done():
+			panic(ctx.Err())
+		}
+		select {
+		case pythonMain = <-chanFromMain:
+		// nop
+		case <-ctx.Done():
+			panic(ctx.Err())
+		}
+	}
+
+	return pythonMain, nil
+}
+
+// unloadPython tears down the global interpreter state.
+//
+// Must be called with the go routine thread pinned and global mutex locked.
+func unloadPython(_ context.Context) error {
+	globalMtx.AssertLocked()
+
+	if !pythonLoaded {
+		return errors.New("invalid runtime state")
+	}
+
+	consumersCnt--
+	if consumersCnt == 0 {
+		chanToMain <- nil
+	}
+
+	return nil
+}
+
+func launchOnce() {
+	globalMtx.AssertLocked()
+	if pythonStarted {
+		return
+	}
+	pythonStarted = true
 
 	// Starting and stopping the Python main interpreter cannot be done from
 	// different threads because of some reliance on thread-local storage,
@@ -129,77 +184,68 @@ func loadPython(exe, home string, paths []string) (py.PyThreadStatePtr, error) {
 		runtime.LockOSThread()
 		defer runtime.UnlockOSThread()
 
-		// Pre-configure the Python Interpreter. Not 100% necessary, but gives us
-		// more control and identifies errors early.
-		preConfig := py.PyPreConfig{}
-		py.PyPreConfig_InitIsolatedConfig(&preConfig)
-		status := py.Py_PreInitialize(&preConfig)
-		if status.Type != 0 {
-			msg, _ := py.WCharToString(status.ErrMsg)
-			panic(msg)
-		}
+		for {
+			// Block until we are handed a config.
+			config := <-chanToMain
 
-		// Configure our Paths. We need to approximate an isolated pyConfig from a
-		// regular config because Python will ignore our modifying some values if
-		// we initialize an isolated pyConfig. Annoying!
-		pyConfig := py.PyConfig_3_12{}
-		py.PyConfig_InitPythonConfig(&pyConfig)
-		pyConfig.ParseArgv = 0 // We don't want Python looking at argv.
-		pyConfig.SafePath = 0
-		pyConfig.UserSiteDirectory = 0
-		pyConfig.InstallSignalHandlers = 0 // We don't want Python handling signals.
+			// Pre-configure the Python Interpreter. Not 100% necessary, but gives us
+			// more control and identifies errors early.
+			preConfig := py.PyPreConfig{}
+			py.PyPreConfig_InitIsolatedConfig(&preConfig)
+			status := py.Py_PreInitialize(&preConfig)
+			if status.Type != 0 {
+				msg, _ := py.WCharToString(status.ErrMsg)
+				panic(msg)
+			}
 
-		// We need to write funky wchar_t strings to our config, so we do a little
-		// dance with some helper functions.
-		status = py.PyConfig_SetBytesString(&pyConfig, &pyConfig.Home, home)
-		if status.Type != 0 {
-			msg, _ := py.WCharToString(status.ErrMsg)
-			panic(msg)
-		}
-		path := strings.Join(paths, ":") // xxx ';' on windows
-		status = py.PyConfig_SetBytesString(&pyConfig, &pyConfig.PythonPathEnv, path)
-		if status.Type != 0 {
-			msg, _ := py.WCharToString(status.ErrMsg)
-			panic(msg)
-		}
-		status = py.Py_InitializeFromConfig(&pyConfig)
-		if status.Type != 0 {
-			msg, _ := py.WCharToString(status.ErrMsg)
-			panic(msg)
-		}
+			// Configure our Paths. We need to approximate an isolated pyConfig from a
+			// regular config because Python will ignore our modifying some values if
+			// we initialize an isolated pyConfig. Annoying!
+			pyConfig := py.PyConfig_3_12{}
+			py.PyConfig_InitPythonConfig(&pyConfig)
+			pyConfig.ParseArgv = 0 // We don't want Python looking at argv.
+			pyConfig.SafePath = 0
+			pyConfig.UserSiteDirectory = 0
+			pyConfig.InstallSignalHandlers = 0 // We don't want Python handling signals.
 
-		// If we made it here, the main interpreter is started.
-		// Save details on our Main thread state and drop GIL.
-		ts := py.PyEval_SaveThread()
-		py.PyThreadState_Swap(py.NullThreadState)
-		tsChan <- ts
+			// We need to write funky wchar_t strings to our config, so we do a little
+			// dance with some helper functions.
+			status = py.PyConfig_SetBytesString(&pyConfig, &pyConfig.Home, config.home)
+			if status.Type != 0 {
+				msg, _ := py.WCharToString(status.ErrMsg)
+				panic(msg)
+			}
+			path := strings.Join(config.paths, ":") // xxx ';' on windows
+			status = py.PyConfig_SetBytesString(&pyConfig, &pyConfig.PythonPathEnv, path)
+			if status.Type != 0 {
+				msg, _ := py.WCharToString(status.ErrMsg)
+				panic(msg)
+			}
 
-		// Wait until all consumers disappear.
-		mainWg.Wait()
+			// Start up the main interpreter.
+			status = py.Py_InitializeFromConfig(&pyConfig)
+			if status.Type != 0 {
+				msg, _ := py.WCharToString(status.ErrMsg)
+				panic(msg)
+			}
 
-		// Finalize Python. This has potential to deadlock or panic!
-		py.PyEval_RestoreThread(ts)
-		if py.Py_FinalizeEx() != 0 {
-			panic("failed to finalize Python runtime")
+			// If we made it here, the main interpreter is started.
+			// Drop GIL and send back some details on our main thread.
+			ts := py.PyEval_SaveThread()
+			if ts == py.NullThreadState {
+				panic("main thread state is null")
+			}
+			chanFromMain <- ts
+
+			// Wait until all consumers disappear. We just try pulling a pointer
+			// out of the channel as a simple block.
+			<-chanToMain
+
+			// Finalize Python. This has potential to deadlock or panic!
+			py.PyEval_RestoreThread(ts)
+			if py.Py_FinalizeEx() != 0 {
+				panic("failed to finalize Python runtime")
+			}
 		}
 	}()
-
-	// Block until we have a viable main thread state.
-	pythonMain = <-tsChan
-
-	return pythonMain, nil
-}
-
-// unloadPython tears down the global interpreter state.
-//
-// Must be called with the go routine thread pinned and global mutex locked.
-func unloadPython(mainThread py.PyThreadStatePtr) error {
-	globalMtx.AssertLocked()
-
-	if !pythonLoaded {
-		return errors.New("invalid runtime state")
-	}
-
-	mainWg.Done()
-	return nil
 }
