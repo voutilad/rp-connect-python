@@ -2,6 +2,7 @@ input:
   python:
     name: pickle_the_time
     pickle: true
+    batch_size: 5
     script: |
       def pickle_the_time(state = {}):
         import pickle

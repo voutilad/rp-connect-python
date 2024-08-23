@@ -11,4 +11,4 @@ input:
 output:
   stdout: {}
 logger:
-  level: OFF
+  level: INFO

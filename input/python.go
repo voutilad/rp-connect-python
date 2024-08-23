@@ -35,7 +35,9 @@ type pythonInput struct {
 	pickle        bool
 	script        string
 	generatorName string
-	idx           int
+	idx           int64
+	batchSize     int
+	boundsHint    int64
 }
 
 var configSpec = service.NewConfigSpec().
@@ -51,13 +53,18 @@ var configSpec = service.NewConfigSpec().
 	Field(service.NewBoolField("pickle").
 		Description("Whether to serialize data with pickle.").
 		Default(false)).
+	Field(service.NewIntField("batch_size").
+		Description("Size of batches to generate.").
+		Default(1)).
 	Field(service.NewStringField("mode").
 		Description("Toggle different Python runtime modes: 'multi', 'single', and 'legacy' (the default)").
 		Default(string(python.LegacyMode)))
 
+func noOpAckFn(_ context.Context, _ error) error { return nil }
+
 func init() {
-	err := service.RegisterInput("python", configSpec,
-		func(conf *service.ParsedConfig, mgr *service.Resources) (service.Input, error) {
+	err := service.RegisterBatchInput("python", configSpec,
+		func(conf *service.ParsedConfig, mgr *service.Resources) (service.BatchInput, error) {
 			// Extract our configuration.
 			exe, err := conf.FieldString("exe")
 			if err != nil {
@@ -79,7 +86,11 @@ func init() {
 			if err != nil {
 				return nil, err
 			}
-			return newPythonInput(exe, script, name, pickle, python.StringAsMode(modeString), mgr.Logger())
+			batchSize, err := conf.FieldInt("batch_size")
+			if err != nil {
+				return nil, err
+			}
+			return newPythonInput(exe, script, name, batchSize, pickle, python.StringAsMode(modeString), mgr.Logger())
 		})
 
 	if err != nil {
@@ -87,7 +98,7 @@ func init() {
 	}
 }
 
-func newPythonInput(exe, script, name string, pickle bool, mode python.Mode, logger *service.Logger) (service.Input, error) {
+func newPythonInput(exe, script, name string, batchSize int, pickle bool, mode python.Mode, logger *service.Logger) (service.BatchInput, error) {
 	var err error
 	var r python.Runtime
 
@@ -112,6 +123,8 @@ func newPythonInput(exe, script, name string, pickle bool, mode python.Mode, log
 		script:        script,
 		generatorName: name,
 		pickle:        pickle,
+		batchSize:     batchSize,
+		boundsHint:    -1,
 	}, nil
 }
 
@@ -171,12 +184,15 @@ func (p *pythonInput) Connect(ctx context.Context) error {
 			p.mode = Iterable
 		case py.List:
 			p.mode = List
+			p.boundsHint = py.PyList_Size(obj)
 		case py.Tuple:
 			p.mode = Tuple
+			p.boundsHint = py.PyTuple_Size(obj)
 		case py.Function:
 			p.mode = Callable
 		default:
 			p.mode = Object
+			p.boundsHint = 1
 		}
 		p.generator = obj
 
@@ -194,115 +210,131 @@ func (p *pythonInput) Connect(ctx context.Context) error {
 	return nil
 }
 
-func (p *pythonInput) Read(ctx context.Context) (*service.Message, service.AckFunc, error) {
-	var m *service.Message = nil
-
+func (p *pythonInput) ReadBatch(ctx context.Context) (service.MessageBatch, service.AckFunc, error) {
 	ticket, err := p.runtime.Acquire(ctx)
 	if err != nil {
 		panic(err)
 	}
 	defer func() { _ = p.runtime.Release(ticket) }()
 
+	batch := service.MessageBatch{}
+
 	err = p.runtime.Apply(ticket, ctx, func() error {
-		var next py.PyObjectPtr
+		for cnt := 0; cnt < p.batchSize; cnt++ {
+			next := py.NullPyObjectPtr
+			switch p.mode {
+			case Object:
+				if p.idx >= p.boundsHint {
+					return nil
+				}
+				next = p.generator
+				p.idx++
 
-		switch p.mode {
-		case Object:
-			if p.idx > 0 {
-				// Only process an object once.
-				return service.ErrEndOfInput
-			}
-			next = p.generator
-			p.idx++
+			case Iterable:
+				next = py.PyIter_Next(p.generator)
+				if next == py.NullPyObjectPtr {
+					// Generator is exhausted.
+					p.logger.Info("generator finished")
+					return nil
+				}
+				py.Py_DecRef(next)
 
-		case Iterable:
-			next = py.PyIter_Next(p.generator)
-			if next == py.NullPyObjectPtr {
-				return service.ErrEndOfInput
-			}
-			defer py.Py_DecRef(next)
+			case List:
+				if p.idx >= p.boundsHint {
+					return nil
+				}
+				next = py.PyList_GetItem(p.generator, p.idx)
+				p.idx++
+				if next == py.NullPyObjectPtr {
+					py.PyErr_Clear()
+					panic("out of bounds Python list index")
+				}
 
-		case List:
-			next = py.PyList_GetItem(p.generator, int64(p.idx))
-			p.idx++
-			if next == py.NullPyObjectPtr {
+			case Tuple:
+				if p.idx >= p.boundsHint {
+					return nil
+				}
+				next = py.PyTuple_GetItem(p.generator, p.idx)
+				p.idx++
+				if next == py.NullPyObjectPtr {
+					py.PyErr_Clear()
+					panic("out of bounds Python tuple index")
+				}
+
+			case Callable:
 				py.PyErr_Clear()
-				return service.ErrEndOfInput
+				next = py.PyObject_Call(p.generator, p.args, p.kwargs)
+				if next == py.NullPyObjectPtr {
+					py.PyErr_Print()
+					panic("null result from calling python input function")
+				}
+				if py.BaseType(next) == py.None {
+					// No more work.
+					return nil
+				}
+
+			default:
+				panic("unhandled input mode")
 			}
 
-		case Tuple:
-			next = py.PyTuple_GetItem(p.generator, int64(p.idx))
-			p.idx++
-			if next == py.NullPyObjectPtr {
-				py.PyErr_Clear()
-				return service.ErrEndOfInput
-			}
+			switch py.BaseType(next) {
+			case py.None:
+				return nil
 
-		case Callable:
-			py.PyErr_Clear()
-			next = py.PyObject_Call(p.generator, p.args, p.kwargs)
-			if next == py.NullPyObjectPtr {
-				py.PyErr_Print()
-				p.logger.Error("null result from calling python input function")
-				return service.ErrEndOfInput
-			}
-			if py.BaseType(next) == py.None {
-				// No more work.
-				return service.ErrEndOfInput
-			}
+			case py.Long:
+				// TODO: overflow (signed vs. unsigned)
+				long := py.PyLong_AsLong(next)
+				m := service.NewMessage([]byte{})
+				m.SetStructured(long)
+				batch = append(batch, m)
 
-		default:
-			panic("unhandled input mode")
+			case py.Float:
+				float := py.PyFloat_AsDouble(next)
+				m := service.NewMessage([]byte{})
+				m.SetStructured(float)
+				batch = append(batch, m)
+
+			case py.String:
+				s, decodeErr := py.UnicodeToString(next)
+				if decodeErr != nil {
+					panic("failed to decode python input string")
+				}
+				m := service.NewMessage([]byte(s))
+				batch = append(batch, m)
+
+			case py.Bytes:
+				// Copy out the bytes.
+				bytes := py.PyBytes_AsString(next)
+				sz := py.PyBytes_Size(next)
+				buffer := make([]byte, sz)
+				copy(buffer, unsafe.Slice(bytes, sz))
+				m := service.NewMessage(buffer)
+				batch = append(batch, m)
+
+			case py.Tuple, py.List, py.Dict, py.Unknown:
+				// Use the serializer.
+				var buffer []byte
+				if p.pickle {
+					buffer, err = p.serializer.Pickle(next)
+				} else {
+					buffer, err = p.serializer.JsonBytes(next)
+				}
+				if err != nil {
+					panic(err)
+				}
+				m := service.NewMessage(buffer)
+				batch = append(batch, m)
+			}
 		}
 
-		switch py.BaseType(next) {
-		case py.None:
-			return service.ErrEndOfInput
-
-		case py.Long:
-			// TODO: overflow (signed vs. unsigned)
-			long := py.PyLong_AsLong(next)
-			m = service.NewMessage([]byte{})
-			m.SetStructured(long)
-
-		case py.Float:
-			float := py.PyFloat_AsDouble(next)
-			m = service.NewMessage([]byte{})
-			m.SetStructured(float)
-
-		case py.String:
-			s, err := py.UnicodeToString(next)
-			if err != nil {
-				p.logger.Error("failed to decode python input string")
-				return service.ErrEndOfInput
-			}
-			m = service.NewMessage([]byte(s))
-
-		case py.Bytes:
-			// Copy out the bytes.
-			bytes := py.PyBytes_AsString(next)
-			sz := py.PyBytes_Size(next)
-			buffer := make([]byte, sz)
-			copy(buffer, unsafe.Slice(bytes, sz))
-			m = service.NewMessage(buffer)
-
-		case py.Tuple, py.List, py.Dict, py.Unknown:
-			// Use the serializer.
-			var buffer []byte
-			if p.pickle {
-				buffer, err = p.serializer.Pickle(next)
-			} else {
-				buffer, err = p.serializer.JsonBytes(next)
-			}
-			if err != nil {
-				panic(err)
-			}
-			m = service.NewMessage(buffer)
-		}
 		return nil
 	})
 
-	return m, func(ctx context.Context, err error) error { return nil }, err
+	if len(batch) == 0 || err != nil {
+		return nil, nil, service.ErrEndOfInput
+	}
+
+	return batch, noOpAckFn, nil
 }
 
 func (p *pythonInput) Close(ctx context.Context) error {
