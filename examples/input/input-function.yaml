@@ -1,0 +1,18 @@
+input:
+  python:
+    name: fetch
+    script: |
+      def fetch(state={}):
+        # Your function can optionally receive a state dictionary to use for
+        # retaining information across invocations. It's provided via kwargs,
+        # so either need to have a named "state" arg or use python's kwargs.
+        cnt = state.get("cnt", 0)
+        if cnt < 10:
+          state.update({"cnt": cnt + 1})
+          return cnt
+        else:
+          return None
+output:
+  stdout: {}
+logger:
+  level: OFF

@@ -1,0 +1,14 @@
+input:
+  python:
+    name: g
+    script: |
+      # Create a python generator.
+      data = range(10)
+      def f():
+        for i in data:
+          yield i
+      g = f()
+output:
+  stdout: {}
+logger:
+  level: OFF

@@ -203,6 +203,7 @@ func (p *pythonInput) Read(ctx context.Context) (*service.Message, service.AckFu
 				return service.ErrEndOfInput
 			}
 			defer py.Py_DecRef(next)
+
 		case List:
 			next = py.PyList_GetItem(p.generator, int64(p.idx))
 			p.idx++
@@ -210,6 +211,7 @@ func (p *pythonInput) Read(ctx context.Context) (*service.Message, service.AckFu
 				py.PyErr_Clear()
 				return service.ErrEndOfInput
 			}
+
 		case Tuple:
 			next = py.PyTuple_GetItem(p.generator, int64(p.idx))
 			p.idx++
@@ -217,6 +219,7 @@ func (p *pythonInput) Read(ctx context.Context) (*service.Message, service.AckFu
 				py.PyErr_Clear()
 				return service.ErrEndOfInput
 			}
+
 		case Callable:
 			py.PyErr_Clear()
 			next = py.PyObject_Call(p.generator, p.args, p.kwargs)
@@ -229,6 +232,7 @@ func (p *pythonInput) Read(ctx context.Context) (*service.Message, service.AckFu
 				// No more work.
 				return service.ErrEndOfInput
 			}
+
 		default:
 			panic("unhandled input mode")
 		}
