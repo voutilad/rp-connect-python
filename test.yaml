@@ -14,11 +14,6 @@ output:
 pipeline:
   processors:
     - python:
-        script: |
-          # Try re-assigning meta dict.
-          root = content()
-          meta = 123
-    - python:
         mode: multi
         script: |
           # Return a lowercase version.
