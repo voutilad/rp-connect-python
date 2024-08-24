@@ -29,16 +29,21 @@ func TestDifferentInterpreterModes(t *testing.T) {
 
 			msg := service.NewMessage(nil)
 			msg.SetStructured(data)
+			batch := service.MessageBatch{msg}
 
-			batch, err := proc.Process(context.Background(), msg)
+			batches, err := proc.ProcessBatch(context.Background(), batch)
 			if err != nil {
 				t.Fatal(err)
 			}
 
-			if len(batch) != 1 {
-				t.Error("expected a message")
+			if len(batches) != 1 {
+				t.Error("expected a single batch")
 			}
-			obj, err := batch[0].AsStructured()
+			newBatch := batches[0]
+			if len(newBatch) != 1 {
+				t.Error("expected a single message")
+			}
+			obj, err := newBatch[0].AsStructured()
 			if err != nil {
 				t.Fatal(err)
 			}

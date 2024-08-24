@@ -2,11 +2,9 @@ package output
 
 import (
 	"context"
-	"github.com/voutilad/rp-connect-python/processor"
-	"runtime"
-
 	"github.com/redpanda-data/benthos/v4/public/service"
 	"github.com/voutilad/rp-connect-python/internal/impl/python"
+	"github.com/voutilad/rp-connect-python/processor"
 )
 
 var configSpec = service.NewConfigSpec().
@@ -22,13 +20,14 @@ var configSpec = service.NewConfigSpec().
 
 type pythonOutput struct {
 	logger    *service.Logger
-	processor service.Processor
+	processor service.BatchProcessor
 }
 
 func init() {
-	err := service.RegisterOutput("python",
+	err := service.RegisterBatchOutput("python",
 		configSpec,
-		func(conf *service.ParsedConfig, mgr *service.Resources) (out service.Output, maxInFlight int, err error) {
+		func(conf *service.ParsedConfig, mgr *service.Resources) (service.BatchOutput, service.BatchPolicy, int, error) {
+			policy := service.BatchPolicy{}
 			// Extract our configuration.
 			exe, err := conf.FieldString("exe")
 			if err != nil {
@@ -36,18 +35,18 @@ func init() {
 			}
 			script, err := conf.FieldString("script")
 			if err != nil {
-				return nil, -1, err
+				return nil, policy, 0, err
 			}
 			modeString, err := conf.FieldString("mode")
 			if err != nil {
-				return nil, -1, err
+				return nil, policy, 0, err
 			}
 
 			p, err := processor.NewPythonProcessor(exe, script, python.StringAsMode(modeString), mgr.Logger())
 			return &pythonOutput{
 				logger:    mgr.Logger(),
 				processor: p,
-			}, runtime.NumCPU(), nil
+			}, policy, 1, nil
 		})
 
 	if err != nil {
@@ -60,11 +59,10 @@ func (p *pythonOutput) Connect(_ context.Context) error {
 	return nil
 }
 
-func (p *pythonOutput) Write(ctx context.Context, m *service.Message) error {
+func (p *pythonOutput) WriteBatch(ctx context.Context, batch service.MessageBatch) error {
 	// TODO: for now we hack and just pass it to a PythonProcessor and ignore
 	//       if it returns a batch.
-	p.logger.Debug("CALLED!")
-	_, err := p.processor.Process(ctx, m)
+	_, err := p.processor.ProcessBatch(ctx, batch)
 	return err
 }
 

@@ -88,8 +88,8 @@ func init() {
 			Default(string(python.LegacyMode)))
 	// TODO: linting rules for configuration fields
 
-	err := service.RegisterProcessor("python", configSpec,
-		func(conf *service.ParsedConfig, mgr *service.Resources) (service.Processor, error) {
+	err := service.RegisterBatchProcessor("python", configSpec,
+		func(conf *service.ParsedConfig, mgr *service.Resources) (service.BatchProcessor, error) {
 			// Extract our configuration.
 			exe, err := conf.FieldString("exe")
 			if err != nil {
@@ -117,7 +117,7 @@ func init() {
 //
 // This will create and initialize a new sub-interpreter from the main Python
 // Go routine and precompile some Python code objects.
-func NewPythonProcessor(exe, script string, mode python.Mode, logger *service.Logger) (service.Processor, error) {
+func NewPythonProcessor(exe, script string, mode python.Mode, logger *service.Logger) (service.BatchProcessor, error) {
 	var err error
 	ctx := context.Background()
 
@@ -303,8 +303,8 @@ func newSingleRuntimeProcessor(exe string, logger *service.Logger) (*PythonProce
 	return &p, nil
 }
 
-// Process a given Redpanda Connect service.Message using Python.
-func (p *PythonProcessor) Process(ctx context.Context, m *service.Message) (service.MessageBatch, error) {
+// ProcessBatch executes the given Python script against each message in the batch.
+func (p *PythonProcessor) ProcessBatch(ctx context.Context, batch service.MessageBatch) ([]service.MessageBatch, error) {
 	// Acquire an interpreter and look up our local state.
 	token, err := p.runtime.Acquire(ctx)
 	if err != nil {
@@ -315,63 +315,71 @@ func (p *PythonProcessor) Process(ctx context.Context, m *service.Message) (serv
 	// Look up our previously initialized interpreter state.
 	i := p.interpreters[token.Id()]
 
-	// Assume we're successful and that we'll be returning a batch of 1 message.
-	batch := []*service.Message{m}
+	// At the moment, we only do 1:1 transformations and the script cannot
+	// produce new batches from a single message.
+	newBatch := service.MessageBatch{}
 
 	err = p.runtime.Apply(token, ctx, func() error {
-		// Clear out any local state from previous messages.
-		py.PyDict_Clear(i.meta)
-		py.PyObject_CallNoArgs(i.rootClear)
+		for _, m := range batch {
+			// Clear out any local state from previous messages.
+			py.PyDict_Clear(i.meta)
+			py.PyObject_CallNoArgs(i.rootClear)
 
-		py.PyDict_SetItemString(i.locals, "root", i.root)
-		py.PyDict_SetItemString(i.locals, "meta", i.meta)
+			py.PyDict_SetItemString(i.locals, "root", i.root)
+			py.PyDict_SetItemString(i.locals, "meta", i.meta)
 
-		// Set up our pointer to our service.Message.
-		addr := py.PyLong_FromUnsignedLong(uint64(uintptr(unsafe.Pointer(m))))
-		if py.PyModule_AddObjectRef(i.helperModule, GlobalMessageAddr, addr) != 0 {
-			return errors.New("failed to set address of message")
-		}
-		py.Py_DecRef(addr)
+			// Set up our pointer to our service.Message.
+			addr := py.PyLong_FromUnsignedLong(uint64(uintptr(unsafe.Pointer(m))))
+			if py.PyModule_AddObjectRef(i.helperModule, GlobalMessageAddr, addr) != 0 {
+				return errors.New("failed to set address of message")
+			}
+			py.Py_DecRef(addr)
 
-		// Evaluate the Python script that was pre-compiled into a code object.
-		// It should have access to global helper functions/classes and should
-		// set a local called "root".
-		result := py.PyEval_EvalCode(i.code, i.globals, i.locals)
-		if result == py.NullPyObjectPtr {
-			py.PyErr_Print()
-			return errors.New("problem executing Python script")
-		}
-		py.Py_DecRef(result)
+			// Evaluate the Python script that was pre-compiled into a code object.
+			// It should have access to global helper functions/classes and should
+			// set a local called "root".
+			result := py.PyEval_EvalCode(i.code, i.globals, i.locals)
+			if result == py.NullPyObjectPtr {
+				py.PyErr_Print()
+				return errors.New("problem executing Python script")
+			}
+			py.Py_DecRef(result)
 
-		// The user script should have modified a local called "root".
-		// Note: we don't call Py_DecRef as this is a borrowed reference.
-		root := py.PyDict_GetItemString(i.locals, "root")
-		if root == py.NullPyObjectPtr {
-			return errors.New("'root' not found in Python script")
-		}
-		drop, err := handleRoot(root, m, i)
-		if drop {
-			batch = []*service.Message{}
-		}
-		if err != nil {
-			return err
-		}
+			// The user script should have modified a local called "root".
+			// Note: we don't call Py_DecRef as this is a borrowed reference.
+			root := py.PyDict_GetItemString(i.locals, "root")
+			if root == py.NullPyObjectPtr {
+				return errors.New("'root' not found in Python script")
+			}
+			drop, err := handleRoot(root, m, i)
+			if drop {
+				// TODO: Is this correct? To drop do we just not output a new message?
+				continue
+			}
+			if err != nil {
+				m.SetError(err)
+				newBatch = append(newBatch, m)
+				continue
+			}
 
-		// The user might have modified the "meta" mapping to set new metadata
-		// on the message.
-		meta := py.PyDict_GetItemString(i.locals, "meta")
-		if meta != py.NullPyObjectPtr {
-			// XXX If meta is re-assigned and _not_ a dictionary, we error but
-			// keep running. Not sure best approach yet.
-			err = handleMeta(meta, m, i)
+			// The user might have modified the "meta" mapping to set new metadata
+			// on the message.
+			meta := py.PyDict_GetItemString(i.locals, "meta")
+			if meta != py.NullPyObjectPtr {
+				// XXX If meta is re-assigned and _not_ a dictionary, we error but
+				// keep running. Not sure best approach yet.
+				err = handleMeta(meta, m, i)
+				if err != nil {
+					m.SetError(err)
+				}
+			}
+
+			newBatch = append(newBatch, m)
 		}
-		return err
+		return nil
 	})
 
-	if err != nil {
-		m.SetError(err)
-	}
-	return batch, err
+	return []service.MessageBatch{newBatch}, err
 }
 
 // handleRoot post-processes the `root` object the Python script may have
