@@ -48,7 +48,7 @@ var configSpec = service.NewConfigSpec().
 		Description("Path to a Python executable.").
 		Default("python3")).
 	Field(service.NewStringField("name").
-		Description("Name of python function to call for generating data.").
+		Description("Name of python function to call or object to read for generating data.").
 		Default("read")).
 	Field(service.NewBoolField("pickle").
 		Description("Whether to serialize data with pickle.").
@@ -135,6 +135,14 @@ func (p *pythonInput) Connect(ctx context.Context) error {
 	}
 
 	err = p.runtime.Map(ctx, func(_ *python.InterpreterTicket) error {
+		// Compile our script early to detect syntax errors.
+		code := py.Py_CompileString(p.script, "__rp_connect_python_input__.py", py.PyFileInput)
+		if code == py.NullPyCodeObjectPtr {
+			py.PyErr_Print()
+			return errors.New("failed to compile python script")
+		}
+		p.code = code
+
 		main := py.PyImport_AddModule("__main__")
 		if main == py.NullPyObjectPtr {
 			return errors.New("failed to add __main__ module")
@@ -156,14 +164,6 @@ func (p *pythonInput) Connect(ctx context.Context) error {
 		p.globals = globals
 		p.args = args
 		p.kwargs = kwargs
-
-		// Compile our script and find our helpers.
-		code := py.Py_CompileString(p.script, "rp_connect_python_input.py", py.PyFileInput)
-		if code == py.NullPyCodeObjectPtr {
-			py.PyErr_Print()
-			return errors.New("failed to compile python script")
-		}
-		p.code = code
 
 		// Execute the script to establish our data generating object.
 		result := py.PyEval_EvalCode(code, p.globals, py.NullPyObjectPtr)
@@ -204,10 +204,12 @@ func (p *pythonInput) Connect(ctx context.Context) error {
 
 		return nil
 	})
+
 	if err != nil {
-		panic(err)
+		// Try cleaning up if we had an issue.
+		_ = p.runtime.Stop(ctx)
 	}
-	return nil
+	return err
 }
 
 func (p *pythonInput) ReadBatch(ctx context.Context) (service.MessageBatch, service.AckFunc, error) {
@@ -217,11 +219,16 @@ func (p *pythonInput) ReadBatch(ctx context.Context) (service.MessageBatch, serv
 	}
 	defer func() { _ = p.runtime.Release(ticket) }()
 
-	batch := service.MessageBatch{}
+	batch := make(service.MessageBatch, p.batchSize)
+	idx := 0
 
 	err = p.runtime.Apply(ticket, ctx, func() error {
-		for cnt := 0; cnt < p.batchSize; cnt++ {
-			next := py.NullPyObjectPtr
+		next := py.NullPyObjectPtr
+
+		// TODO: add a flush timeout? Right now we fill a batch.
+		for ; idx < p.batchSize; idx++ {
+			needsDecref := false
+
 			switch p.mode {
 			case Object:
 				if p.idx >= p.boundsHint {
@@ -233,11 +240,9 @@ func (p *pythonInput) ReadBatch(ctx context.Context) (service.MessageBatch, serv
 			case Iterable:
 				next = py.PyIter_Next(p.generator)
 				if next == py.NullPyObjectPtr {
-					// Generator is exhausted.
-					p.logger.Info("generator finished")
 					return nil
 				}
-				py.Py_DecRef(next)
+				needsDecref = true
 
 			case List:
 				if p.idx >= p.boundsHint {
@@ -272,6 +277,7 @@ func (p *pythonInput) ReadBatch(ctx context.Context) (service.MessageBatch, serv
 					// No more work.
 					return nil
 				}
+				needsDecref = true
 
 			default:
 				panic("unhandled input mode")
@@ -286,21 +292,20 @@ func (p *pythonInput) ReadBatch(ctx context.Context) (service.MessageBatch, serv
 				long := py.PyLong_AsLong(next)
 				m := service.NewMessage([]byte{})
 				m.SetStructured(long)
-				batch = append(batch, m)
+				batch[idx] = m
 
 			case py.Float:
 				float := py.PyFloat_AsDouble(next)
 				m := service.NewMessage([]byte{})
 				m.SetStructured(float)
-				batch = append(batch, m)
+				batch[idx] = m
 
 			case py.String:
 				s, decodeErr := py.UnicodeToString(next)
 				if decodeErr != nil {
 					panic("failed to decode python input string")
 				}
-				m := service.NewMessage([]byte(s))
-				batch = append(batch, m)
+				batch[idx] = service.NewMessage([]byte(s))
 
 			case py.Bytes:
 				// Copy out the bytes.
@@ -308,8 +313,7 @@ func (p *pythonInput) ReadBatch(ctx context.Context) (service.MessageBatch, serv
 				sz := py.PyBytes_Size(next)
 				buffer := make([]byte, sz)
 				copy(buffer, unsafe.Slice(bytes, sz))
-				m := service.NewMessage(buffer)
-				batch = append(batch, m)
+				batch[idx] = service.NewMessage(buffer)
 
 			case py.Tuple, py.List, py.Dict, py.Unknown:
 				// Use the serializer.
@@ -322,19 +326,24 @@ func (p *pythonInput) ReadBatch(ctx context.Context) (service.MessageBatch, serv
 				if err != nil {
 					panic(err)
 				}
-				m := service.NewMessage(buffer)
-				batch = append(batch, m)
+				batch[idx] = service.NewMessage(buffer)
+			}
+
+			if needsDecref {
+				py.Py_DecRef(next)
 			}
 		}
 
 		return nil
 	})
 
-	if len(batch) == 0 || err != nil {
+	if idx == 0 || err != nil {
 		return nil, nil, service.ErrEndOfInput
 	}
 
-	return batch, noOpAckFn, nil
+	// TODO: should we return service.ErrEndOfInput here, too, if we know
+	//       that we're finished?
+	return batch[0:idx], noOpAckFn, nil
 }
 
 func (p *pythonInput) Close(ctx context.Context) error {
