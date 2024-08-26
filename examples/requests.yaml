@@ -33,3 +33,5 @@ output:
 
 logger:
   level: OFF
+http:
+  enabled: false

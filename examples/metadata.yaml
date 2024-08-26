@@ -19,3 +19,6 @@ pipeline:
 
 output:
   stdout: {}
+
+http:
+  enabled: false

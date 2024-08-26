@@ -11,3 +11,6 @@ output:
     script: |
       msg = content().decode()
       print(f"msg: {msg}")
+
+http:
+  enabled: false

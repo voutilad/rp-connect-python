@@ -1,0 +1,23 @@
+input:
+  python:
+    mode: single
+    name: df
+    pickle: true
+    script: |
+      import pandas as pd
+      df = pd.DataFrame.from_dict({"name": ["Maple", "Moxie"], "age": [8, 3]})
+
+pipeline:
+  processors:
+    - python:
+        mode: single
+        script: |
+          import pickle
+          df = pickle.loads(content())
+          root = df.to_dict("list")
+
+output:
+  stdout: {}
+
+logger:
+  level: OFF

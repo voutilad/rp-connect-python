@@ -42,3 +42,6 @@ output:
       d = pickle.loads(msg)
       print(d)
 
+http:
+  enabled: false
+
