@@ -8,7 +8,11 @@ input:
         for i in data:
           yield i
       g = f()
+
 output:
   stdout: {}
+
 logger:
   level: INFO
+http:
+  enabled: false

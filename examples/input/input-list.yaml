@@ -4,7 +4,11 @@ input:
     script: |
       # You can use a list or tuple as the data generator.
       data = list(range(10))
+
 output:
   stdout: {}
+
 logger:
   level: INFO
+http:
+  enabled: false

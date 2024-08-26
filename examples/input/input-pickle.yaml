@@ -5,6 +5,7 @@ input:
     script: |
       from examples.input.widget import Widget
       widget = Widget(123)
+
 pipeline:
   processors:
     - python:
@@ -12,7 +13,11 @@ pipeline:
           import pickle
           widget = pickle.loads(content())
           root = str(widget)
+
 output:
   stdout: {}
+
 logger:
   level: OFF
+http:
+  enabled: false

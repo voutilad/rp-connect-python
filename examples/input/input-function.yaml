@@ -12,7 +12,11 @@ input:
           return cnt
         else:
           return None
+
 output:
   stdout: {}
+
 logger:
   level: OFF
+http:
+  enabled: false

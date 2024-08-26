@@ -3,7 +3,11 @@ input:
     name: data
     script: |
       data = "Dave"
+
 output:
   stdout: {}
+
 logger:
   level: OFF
+http:
+  enabled: false
