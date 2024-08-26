@@ -42,7 +42,7 @@ func init() {
 				return nil, policy, 0, err
 			}
 
-			p, err := processor.NewPythonProcessor(exe, script, python.StringAsMode(modeString), mgr.Logger())
+			p, err := processor.NewPythonProcessor(exe, script, 1, python.StringAsMode(modeString), mgr.Logger())
 			return &pythonOutput{
 				logger:    mgr.Logger(),
 				processor: p,

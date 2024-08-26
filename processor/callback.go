@@ -2,9 +2,10 @@ package processor
 
 import (
 	"fmt"
+	"unsafe"
+
 	"github.com/redpanda-data/benthos/v4/public/service"
 	py "github.com/voutilad/gogopython"
-	"unsafe"
 )
 
 // contentCallback is called from Python and copies the underlying bytes of
@@ -80,12 +81,16 @@ func metadataCallback(_, tuple py.PyObjectPtr) py.PyObjectPtr {
 			switch val := val.(type) {
 			case string:
 				obj = py.PyUnicode_FromString(val)
+
 			case int, int8, int16, int32, int64:
 				obj = py.PyLong_FromLong(val.(int64))
+
 			case uint, uint8, uint16, uint32, uint64:
 				obj = py.PyLong_FromUnsignedLong(val.(uint64))
+
 			case float32, float64:
 				obj = py.PyFloat_FromDouble(val.(float64))
+
 			case bool:
 				// XXX this is ugly...seriously? I really don't like Go. :P
 				var i int64
@@ -95,6 +100,7 @@ func metadataCallback(_, tuple py.PyObjectPtr) py.PyObjectPtr {
 					i = 0
 				}
 				obj = py.PyBool_FromLong(i)
+
 			default:
 				// TODO: catch more types in the switch.
 				// XXX for now, we bail out to a string.

@@ -9,6 +9,7 @@ __content_callback = __noop   # our content callback function implemented in Go
 __metadata_callback = __noop  # our metadata callback function implemented in Go
 __message_addr = 0            # the virtual address of a service.Message
 
+
 def content():
     """
     Proxies a call to our callback `__content()` that will copy-in the bytes
@@ -30,6 +31,15 @@ def metadata(key = ""):
         # This is our "no such value for key" response.
         return None
     return value
+
+
+def unpickle():
+    """
+    Helper function for unpickling a message and returning the Python object.
+    :return: un-pickled python object
+    """
+    import pickle
+    return pickle.loads(__content_callback(__message_addr))
 
 
 class Root:

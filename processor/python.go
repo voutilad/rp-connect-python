@@ -104,7 +104,7 @@ func init() {
 				return nil, err
 			}
 
-			return NewPythonProcessor(exe, script, python.StringAsMode(modeString), mgr.Logger())
+			return NewPythonProcessor(exe, script, runtime.NumCPU(), python.StringAsMode(modeString), mgr.Logger())
 		})
 	if err != nil {
 		// There's no way to fail initialization. We must panic. :(
@@ -117,7 +117,7 @@ func init() {
 //
 // This will create and initialize a new sub-interpreter from the main Python
 // Go routine and precompile some Python code objects.
-func NewPythonProcessor(exe, script string, mode python.Mode, logger *service.Logger) (service.BatchProcessor, error) {
+func NewPythonProcessor(exe, script string, cnt int, mode python.Mode, logger *service.Logger) (service.BatchProcessor, error) {
 	var err error
 	ctx := context.Background()
 
@@ -125,9 +125,9 @@ func NewPythonProcessor(exe, script string, mode python.Mode, logger *service.Lo
 	var processor *PythonProcessor
 	switch mode {
 	case python.MultiMode:
-		processor, err = newMultiRuntimeProcessor(exe, logger)
+		processor, err = newMultiRuntimeProcessor(exe, cnt, logger)
 	case python.LegacyMode:
-		processor, err = newLegacyRuntimeProcessor(exe, logger)
+		processor, err = newLegacyRuntimeProcessor(exe, cnt, logger)
 	case python.SingleMode:
 		processor, err = newSingleRuntimeProcessor(exe, logger)
 	default:
@@ -146,7 +146,7 @@ func NewPythonProcessor(exe, script string, mode python.Mode, logger *service.Lo
 	// Initialize our sub-interpreter state.
 	err = processor.runtime.Map(ctx, func(token *python.InterpreterTicket) error {
 		// Pre-compile our script and helpers.
-		code := py.Py_CompileString(script, "rp_connect_python.py", py.PyFileInput)
+		code := py.Py_CompileString(script, "__rp_connect_python__.py", py.PyFileInput)
 		if code == py.NullPyCodeObjectPtr {
 			py.PyErr_Print()
 			return errors.New("failed to compile python script")
@@ -185,17 +185,17 @@ func NewPythonProcessor(exe, script string, mode python.Mode, logger *service.Lo
 		root := py.PyObject_CallNoArgs(rootClass)
 		if root == py.NullPyObjectPtr {
 			py.PyErr_Print()
-			panic("failed to create new Root instance")
+			return errors.New("failed to create new Root instance")
 		}
 		rootClear := py.PyObject_GetAttrString(root, "clear")
 		if rootClear == py.NullPyObjectPtr {
 			py.PyErr_Print()
-			panic("failed to find clear method on Root instance")
+			return errors.New("failed to find clear method on Root instance")
 		}
 		rootToDict := py.PyObject_GetAttrString(root, "to_dict")
 		if rootToDict == py.NullPyObjectPtr {
 			py.PyErr_Print()
-			panic("failed to find to_dict method on Root instance")
+			return errors.New("failed to find to_dict method on Root instance")
 		}
 
 		// Set up our main module and derive our globals from it.
@@ -221,8 +221,14 @@ func NewPythonProcessor(exe, script string, mode python.Mode, logger *service.Lo
 			return errors.New("failed to find metadata function in helper module")
 		}
 		py.PyDict_SetItemString(globals, "metadata", metadataFn)
+		unpickleFn := py.PyObject_GetAttrString(helperModule, "unpickle")
+		if unpickleFn == py.NullPyObjectPtr {
+			py.PyErr_Print()
+			return errors.New("failed to find unpickle function in helper module")
+		}
+		py.PyDict_SetItemString(globals, "unpickle", unpickleFn)
 
-		// Wire in root and meta objects.
+		// Wire in root and "meta" objects.
 		locals := py.PyDict_New()
 		meta := py.PyDict_New()
 
@@ -250,14 +256,15 @@ func NewPythonProcessor(exe, script string, mode python.Mode, logger *service.Lo
 	})
 
 	if err != nil {
+		// Something is borked. Try to clean up.
+		_ = processor.runtime.Stop(ctx)
 		return nil, err
 	}
 
 	return processor, nil
 }
 
-func newMultiRuntimeProcessor(exe string, logger *service.Logger) (*PythonProcessor, error) {
-	cnt := runtime.NumCPU()
+func newMultiRuntimeProcessor(exe string, cnt int, logger *service.Logger) (*PythonProcessor, error) {
 	r, err := python.NewMultiInterpreterRuntime(exe, cnt, false, logger)
 	if err != nil {
 		return nil, err
@@ -272,8 +279,7 @@ func newMultiRuntimeProcessor(exe string, logger *service.Logger) (*PythonProces
 	return &p, nil
 }
 
-func newLegacyRuntimeProcessor(exe string, logger *service.Logger) (*PythonProcessor, error) {
-	cnt := runtime.NumCPU()
+func newLegacyRuntimeProcessor(exe string, cnt int, logger *service.Logger) (*PythonProcessor, error) {
 	r, err := python.NewMultiInterpreterRuntime(exe, cnt, true, logger)
 	if err != nil {
 		return nil, err
@@ -317,10 +323,13 @@ func (p *PythonProcessor) ProcessBatch(ctx context.Context, batch service.Messag
 
 	// At the moment, we only do 1:1 transformations and the script cannot
 	// produce new batches from a single message.
-	newBatch := service.MessageBatch{}
+	newBatch := make(service.MessageBatch, len(batch))
+	idx := 0
 
 	err = p.runtime.Apply(token, ctx, func() error {
-		for _, m := range batch {
+		for ; idx < len(batch); idx++ {
+			m := batch[idx]
+
 			// Clear out any local state from previous messages.
 			py.PyDict_Clear(i.meta)
 			py.PyObject_CallNoArgs(i.rootClear)
@@ -351,14 +360,17 @@ func (p *PythonProcessor) ProcessBatch(ctx context.Context, batch service.Messag
 			if root == py.NullPyObjectPtr {
 				return errors.New("'root' not found in Python script")
 			}
-			drop, err := handleRoot(root, m, i)
+
+			// Shallow-copy before we mutate the message and metadata.
+			newMessage := m.Copy()
+			drop, err := handleRoot(root, newMessage, i)
 			if drop {
 				// TODO: Is this correct? To drop do we just not output a new message?
 				continue
 			}
 			if err != nil {
-				m.SetError(err)
-				newBatch = append(newBatch, m)
+				newMessage.SetError(err)
+				newBatch[idx] = newMessage
 				continue
 			}
 
@@ -368,18 +380,22 @@ func (p *PythonProcessor) ProcessBatch(ctx context.Context, batch service.Messag
 			if meta != py.NullPyObjectPtr {
 				// XXX If meta is re-assigned and _not_ a dictionary, we error but
 				// keep running. Not sure best approach yet.
-				err = handleMeta(meta, m, i)
+				err = handleMeta(meta, newMessage, i)
 				if err != nil {
-					m.SetError(err)
+					newMessage.SetError(err)
 				}
 			}
 
-			newBatch = append(newBatch, m)
+			newBatch[idx] = newMessage
 		}
 		return nil
 	})
 
-	return []service.MessageBatch{newBatch}, err
+	if idx == 0 || err != nil {
+		return nil, err
+	}
+
+	return []service.MessageBatch{newBatch[0:idx]}, err
 }
 
 // handleRoot post-processes the `root` object the Python script may have
@@ -390,12 +406,15 @@ func handleRoot(root py.PyObjectPtr, m *service.Message, i *interpreter) (drop b
 	case py.None:
 		// Drop the message.
 		return true, nil
+
 	case py.Set:
 		// We can't serialize Sets to JSON.
 		return false, errors.New("cannot serialize a Python set")
+
 	case py.Long:
 		long := py.PyLong_AsLong(root)
 		m.SetStructured(long)
+
 	case py.String:
 		str, err := py.UnicodeToString(root)
 		if err != nil {
@@ -405,15 +424,20 @@ func handleRoot(root py.PyObjectPtr, m *service.Message, i *interpreter) (drop b
 			// having our string wrapped in double-quotes.
 			m.SetBytes([]byte(str))
 		}
+
 	case py.Bytes:
 		// We need to copy-out the bytes into the message. We get a
 		// pointer to the underlying data managed by Python.
 		p := py.PyBytes_AsString(root)
 		sz := py.PyBytes_Size(root)
-		m.SetBytes(unsafe.Slice(p, sz))
+		buffer := make([]byte, sz)
+		copy(buffer, unsafe.Slice(p, sz))
+		m.SetBytes(buffer)
+
 	case py.Unknown:
 		// We'll try serializing this to JSON. It could be a Root type.
 		fallthrough
+
 	case py.Tuple, py.List, py.Dict:
 		// Convert to JSON bytes for now with Python's help ;) because YOLO
 		dict := root
@@ -431,6 +455,7 @@ func handleRoot(root py.PyObjectPtr, m *service.Message, i *interpreter) (drop b
 		}
 		m.SetBytes(buffer)
 	}
+
 	return false, nil
 }
 
@@ -473,22 +498,27 @@ func handleMeta(meta py.PyObjectPtr, m *service.Message, i *interpreter) error {
 		case py.None:
 			// Remove our dictionary item.
 			m.MetaDelete(keyString)
+
 		case py.String:
 			valString, err := py.UnicodeToString(val)
 			if err != nil {
 				panic("could not decode Python string used as metadata value")
 			}
 			m.MetaSetMut(keyString, valString)
+
 		case py.Bytes:
 			p := py.PyBytes_AsString(val)
 			sz := py.PyBytes_Size(val)
 			m.MetaSetMut(keyString, unsafe.Slice(p, sz))
+
 		case py.Long:
 			long := py.PyLong_AsLong(val)
 			m.MetaSetMut(keyString, long)
+
 		case py.Float:
 			float := py.PyFloat_AsDouble(val)
 			m.MetaSetMut(keyString, float)
+
 		case py.Tuple, py.List, py.Dict:
 			// Convert to a JSON string
 			str, err := i.serializer.JsonString(val)
@@ -505,6 +535,7 @@ func handleMeta(meta py.PyObjectPtr, m *service.Message, i *interpreter) error {
 				panic(fmt.Sprintf("%s: %s", "failed to unmarshal json", err))
 			}
 			m.MetaSetMut(keyString, _map)
+
 		default:
 			return errors.New("unhandled metadata dictionary value")
 		}

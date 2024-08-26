@@ -1,28 +1,30 @@
 package processor
 
 import (
+	"runtime"
+	"testing"
+
 	"github.com/redpanda-data/benthos/v4/public/service"
 	"github.com/voutilad/rp-connect-python/internal/impl/python"
 	"golang.org/x/net/context"
-	"testing"
 )
 
 var script = `
 import json
 this = json.loads(content().decode())
-root = json.dumps(this["thing"])
+root = json.dumps(this["thang"])
 `
 
 func TestDifferentInterpreterModes(t *testing.T) {
 	expected := "be thangin'"
 	data := map[string]interface{}{
-		"thing": expected,
+		"thang": expected,
 		"other": 123,
 	}
 
 	for _, m := range []python.Mode{python.MultiMode, python.LegacyMode, python.SingleMode} {
 		t.Run(string(m), func(t *testing.T) {
-			proc, err := NewPythonProcessor("python3", script, m, nil)
+			proc, err := NewPythonProcessor("python3", script, runtime.NumCPU(), m, nil)
 			if err != nil {
 				t.Fatal(err)
 			}
