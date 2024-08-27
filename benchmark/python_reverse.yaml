@@ -1,0 +1,7 @@
+processor_resources:
+  - label: reverse
+    python:
+      mode: multi
+      script: |
+        this = content().decode()
+        root.text = this[::-1]

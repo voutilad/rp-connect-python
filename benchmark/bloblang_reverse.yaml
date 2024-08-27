@@ -1,0 +1,4 @@
+processor_resources:
+  - label: reverse
+    mapping: |
+      root.text = this.text.reverse()
