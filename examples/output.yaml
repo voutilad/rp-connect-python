@@ -1,8 +1,7 @@
 input:
   generate:
-    count: 25
+    count: 5
     interval:
-    batch_size: 1
     mapping: |
       root = "hello world"
 
@@ -10,7 +9,7 @@ output:
   python:
     script: |
       msg = content().decode()
-      print(f"msg: {msg}")
+      print(f"you said: '{msg}'")
 
 http:
   enabled: false
