@@ -363,6 +363,7 @@ func (p *PythonProcessor) ProcessBatch(ctx context.Context, batch service.Messag
 
 			// Shallow-copy before we mutate the message and metadata.
 			newMessage := m.Copy()
+
 			drop, err := handleRoot(root, newMessage, i)
 			if drop {
 				// TODO: Is this correct? To drop do we just not output a new message?
@@ -473,6 +474,7 @@ func handleMeta(meta py.PyObjectPtr, m *service.Message, i *interpreter) error {
 	if keys == py.NullPyObjectPtr {
 		return errors.New("failed to get keys from metadata dictionary")
 	}
+	defer py.Py_DecRef(keys)
 	if py.BaseType(keys) != py.List {
 		// This should not happen. If it does, something is horribly wrong.
 		panic("keys wasn't a Python list?!")
