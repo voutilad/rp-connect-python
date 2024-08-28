@@ -107,7 +107,7 @@ func loadPython(exe, home string, paths []string, ctx context.Context) (py.PyThr
 	// Load our dynamic libraries. This should happen only once per process
 	// lifetime.
 	if !pythonLoaded {
-		err := py.Load_library(exe)
+		err := py.LoadLibrary(exe)
 		if err != nil {
 			panic(err)
 			// return py.NullThreadState, err
