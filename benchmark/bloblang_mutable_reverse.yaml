@@ -1,0 +1,4 @@
+processor_resources:
+  - label: reverse
+    mutation: |
+      root.text = this.text.reverse()
