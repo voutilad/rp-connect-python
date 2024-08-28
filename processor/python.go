@@ -440,17 +440,18 @@ func handleRoot(root py.PyObjectPtr, m *service.Message, i *interpreter) (drop b
 		fallthrough
 
 	case py.Tuple, py.List, py.Dict:
+		obj := root
 		// Convert to JSON bytes for now with Python's help ;) because YOLO
-		dict := root
 		if py.PyObject_IsInstance(root, i.rootClass) == 1 {
 			// We need to convert to a dict first.
-			dict = py.PyObject_CallNoArgs(i.rootToDict)
-			if dict == py.NullPyObjectPtr {
+			obj = py.PyObject_CallNoArgs(i.rootToDict)
+			defer py.Py_DecRef(obj)
+			if obj == py.NullPyObjectPtr {
 				py.PyErr_Print()
 				panic("failed to convert root object to a dict")
 			}
 		}
-		buffer, err := i.serializer.JsonBytes(dict)
+		buffer, err := i.serializer.JsonBytes(obj)
 		if err != nil {
 			panic(err)
 		}
