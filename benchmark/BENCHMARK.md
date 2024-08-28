@@ -1,4 +1,5 @@
 # benchmarks!
+Just some working notes on throughput as hacking continues.
 
 ## reverse
 Take a given text input stored in a named field (i.e. `this.text`), reverse the
@@ -30,14 +31,14 @@ Via bloblang and the `mapping` processor:
 
 ```
 $ time ./rp-connect-python run \
-  -r benchmark/bloblang_reverse.yaml benchmark/bench_100m.yaml 
+  -r benchmark/bloblang_reverse.yaml benchmark/bench_100m.yaml
 
 real    3m3.827s
 user    24m34.662s
 sys     0m28.041s
 
 $ time ./rp-connect-python run \
-  -r benchmark/bloblang_reverse.yaml benchmark/bench_100m.yaml 
+  -r benchmark/bloblang_reverse.yaml benchmark/bench_100m.yaml
 
 real    3m3.146s
 user    24m34.319s
@@ -59,20 +60,20 @@ Via bloblang and the `mutation` processor:
 
 ```
 $ time ./rp-connect-python run \
-  -r benchmark/bloblang_mutation_reverse.yaml benchmark/bench_100m.yaml              
+  -r benchmark/bloblang_mutation_reverse.yaml benchmark/bench_100m.yaml
 
 
 real    2m57.016s
 user    23m33.495s
 sys     0m26.683s
 $ time ./rp-connect-python run \
-  -r benchmark/bloblang_mutation_reverse.yaml benchmark/bench_100m.yaml 
+  -r benchmark/bloblang_mutation_reverse.yaml benchmark/bench_100m.yaml
 
 real    2m56.845s
 user    23m33.779s
 sys     0m27.016s
 $ time ./rp-connect-python run \
-  -r benchmark/bloblang_mutation_reverse.yaml benchmark/bench_100m.yaml 
+  -r benchmark/bloblang_mutation_reverse.yaml benchmark/bench_100m.yaml
 
 real    2m56.045s
 user    23m20.608s
@@ -87,19 +88,19 @@ Via the `python` processor running in `multi` mode:
 
 ```
 $ time ./rp-connect-python run \
-  -r benchmark/python_reverse.yaml benchmark/bench_100m.yaml       
+  -r benchmark/python_reverse.yaml benchmark/bench_100m.yaml
 
 real    8m24.526s
 user    124m3.090s
 sys     2m13.124s
 $ time ./rp-connect-python run \
-  -r benchmark/python_reverse.yaml benchmark/bench_100m.yaml 
+  -r benchmark/python_reverse.yaml benchmark/bench_100m.yaml
 
 real    8m10.400s
 user    120m41.567s
 sys     2m8.110s
 $ time ./rp-connect-python run \
-  -r benchmark/python_reverse.yaml benchmark/bench_100m.yaml 
+  -r benchmark/python_reverse.yaml benchmark/bench_100m.yaml
 
 real    8m14.062s
 user    121m43.118s
@@ -113,7 +114,7 @@ Via the `python` processor running in `legacy` mode:
 
 ```
 $ time ./rp-connect-python \
-  run -r benchmark/python_legacy_reverse.yaml benchmark/bench_100m.yaml 
+  run -r benchmark/python_legacy_reverse.yaml benchmark/bench_100m.yaml
 
 real    46m31.732s
 user    104m34.426s
@@ -127,7 +128,7 @@ Via the `python` processor running in `single` mode:
 
 ```
 $ time ./rp-connect-python \
-  run -r benchmark/python_single_reverse.yaml benchmark/bench_100m.yaml 
+  run -r benchmark/python_single_reverse.yaml benchmark/bench_100m.yaml
 
 TKTKTK
 ```
