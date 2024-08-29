@@ -11,6 +11,7 @@ pipeline:
   processors:
     - python:
         exe: ./venv/bin/python3
+        mode: isolated
         script: |
           import json
           import requests
@@ -24,7 +25,7 @@ pipeline:
           root.msg = f"You said: '{msg}'"
           root.at = time.ctime()
           try:
-            root.ip = requests.get("https://api.ipify.org").text
+            root.ip = str(requests.get("https://api.ipify.org").text)
           except:
             root.ip = "no internet?"
 
