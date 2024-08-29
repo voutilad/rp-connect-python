@@ -51,3 +51,5 @@ func StringAsSerializerMode(s string) SerializerMode {
 		return InvalidSerializer
 	}
 }
+
+const PythonSerializerMetaKey = "_python_serializer"

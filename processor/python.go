@@ -91,7 +91,7 @@ func init() {
 		Field(service.NewStringField("serializer").
 			Description("Serialization mode to use on results.").
 			Examples(string(python.None), string(python.Pickle), string(python.Bloblang)).
-			Default(string(python.None)))
+			Default(string(python.Bloblang)))
 	// TODO: linting rules for configuration fields
 
 	err := service.RegisterBatchProcessor("python", configSpec,
@@ -133,6 +133,13 @@ func NewPythonProcessor(exe, script string, cnt int, mode python.Mode, serialize
 
 	var err error
 	ctx := context.Background()
+
+	// XXX for now, enforce that we only support non-serializing modes when
+	// using a global interpreter mode.
+	if serializer == python.None && mode != python.Global {
+		return nil,
+			errors.New("isolated interpreters require bloblang or pickle serialization")
+	}
 
 	// Spin up our runtime.
 	var processor *PythonProcessor
@@ -328,21 +335,21 @@ func newSingleRuntimeProcessor(exe string, logger *service.Logger) (*PythonProce
 // ProcessBatch executes the given Python script against each message in the batch.
 func (p *PythonProcessor) ProcessBatch(ctx context.Context, batch service.MessageBatch) ([]service.MessageBatch, error) {
 	// Acquire an interpreter and look up our local state.
-	token, err := p.runtime.Acquire(ctx)
+	ticket, err := p.runtime.Acquire(ctx)
 	if err != nil {
 		return nil, err
 	}
-	defer func() { _ = p.runtime.Release(token) }()
+	defer func() { _ = p.runtime.Release(ticket) }()
 
 	// Look up our previously initialized interpreter state.
-	i := p.interpreters[token.Id()]
+	i := p.interpreters[ticket.Id()]
 
 	// At the moment, we only do 1:1 transformations and the script cannot
 	// produce new batches from a single message.
 	newBatch := make(service.MessageBatch, len(batch))
 	idx := 0
 
-	err = p.runtime.Apply(token, ctx, func() error {
+	err = p.runtime.Apply(ticket, ctx, func() error {
 		for ; idx < len(batch); idx++ {
 			m := batch[idx]
 
@@ -350,15 +357,27 @@ func (p *PythonProcessor) ProcessBatch(ctx context.Context, batch service.Messag
 			py.PyDict_Clear(i.meta)
 			py.PyObject_CallNoArgs(i.rootClear)
 
+			// We always have a root and meta instance available, regardless
+			// the interpreter and serializer modes.
 			py.PyDict_SetItemString(i.locals, "root", i.root)
 			py.PyDict_SetItemString(i.locals, "meta", i.meta)
 
-			// Set up our pointer to our service.Message.
+			// Set up our pointer to our service.Message in case the script is
+			// accessing raw bytes.
 			addr := py.PyLong_FromUnsignedLong(uint64(uintptr(unsafe.Pointer(m))))
 			if py.PyModule_AddObjectRef(i.helperModule, GlobalMessageAddr, addr) != 0 {
 				return errors.New("failed to set address of message")
 			}
 			py.Py_DecRef(addr)
+
+			// If the incoming message was from a previous Python component,
+			// see if it passed us a Python object. If so, we use it for
+			// creating "this".
+			this, thisExists := m.MetaGetMut(python.PythonSerializerMetaKey)
+			if thisExists {
+				p.logger.Info("XXX setting this")
+				py.PyDict_SetItemString(i.locals, "this", this.(py.PyObjectPtr))
+			}
 
 			// Evaluate the Python script that was pre-compiled into a code object.
 			// It should have access to global helper functions/classes and should
@@ -380,29 +399,6 @@ func (p *PythonProcessor) ProcessBatch(ctx context.Context, batch service.Messag
 			// Shallow-copy before we mutate the message and metadata.
 			newMessage := m.Copy()
 
-			// TODO: XXX depending on serializer mode, handle things here.
-			switch p.serializerMode {
-			case python.None:
-			// passthrough
-			case python.Bloblang:
-			// TODO
-			case python.Pickle:
-			// TODO
-			default:
-				panic("invalid serializer mode")
-			}
-
-			drop, err := handleRoot(root, newMessage, i)
-			if drop {
-				// TODO: Is this correct? To drop do we just not output a new message?
-				continue
-			}
-			if err != nil {
-				newMessage.SetError(err)
-				newBatch[idx] = newMessage
-				continue
-			}
-
 			// The user might have modified the "meta" mapping to set new metadata
 			// on the message.
 			meta := py.PyDict_GetItemString(i.locals, "meta")
@@ -410,6 +406,45 @@ func (p *PythonProcessor) ProcessBatch(ctx context.Context, batch service.Messag
 				// XXX If meta is re-assigned and _not_ a dictionary, we error but
 				// keep running. Not sure best approach yet.
 				err = handleMeta(meta, newMessage, i)
+				if err != nil {
+					newMessage.SetError(err)
+				}
+			}
+
+			// Handle the actual message data based on our serializer mode.
+			switch p.serializerMode {
+			case python.None:
+				// We don't serialize and instead pass a Python object pointer.
+				if py.BaseType(root) == py.None {
+					// Drop the message.
+					p.logger.Info("XXX dropping")
+
+					continue
+				} else {
+					// XXX validate we're using global interpreter mode?
+					_, err = p.runtime.Reference(root, ticket)
+					if err != nil {
+						panic(err)
+					}
+					newMessage.SetStructured(root)
+				}
+			case python.Bloblang:
+				drop, err := handleRootAsJson(root, newMessage, i)
+				if drop {
+					// TODO: Is this correct? To drop do we just not output a new message?
+					p.logger.Info("XXX dropping")
+					continue
+				}
+				if err != nil {
+					newMessage.SetError(err)
+				}
+
+			case python.Pickle:
+				drop, err := handleRootAsPickle(root, newMessage, i)
+				if drop {
+					// TODO: Is this correct? To drop do we just not output a new message?
+					continue
+				}
 				if err != nil {
 					newMessage.SetError(err)
 				}
@@ -427,9 +462,22 @@ func (p *PythonProcessor) ProcessBatch(ctx context.Context, batch service.Messag
 	return []service.MessageBatch{newBatch[0:idx]}, err
 }
 
+func handleRootAsPickle(root py.PyObjectPtr, m *service.Message, i *interpreter) (bool, error) {
+	if py.BaseType(root) == py.None {
+		// We don't pickle None's.
+		return true, nil
+	}
+	pickled, err := i.serializer.Pickle(root)
+	if err != nil {
+		panic(err)
+	}
+	m.SetBytes(pickled)
+	return false, nil
+}
+
 // handleRoot post-processes the `root` object the Python script may have
 // mutated at runtime.
-func handleRoot(root py.PyObjectPtr, m *service.Message, i *interpreter) (drop bool, err error) {
+func handleRootAsJson(root py.PyObjectPtr, m *service.Message, i *interpreter) (bool, error) {
 	// Check our type and use an optimized conversion approach if possible.
 	switch py.BaseType(root) {
 	case py.None:
@@ -463,11 +511,7 @@ func handleRoot(root py.PyObjectPtr, m *service.Message, i *interpreter) (drop b
 		copy(buffer, unsafe.Slice(p, sz))
 		m.SetBytes(buffer)
 
-	case py.Unknown:
-		// We'll try serializing this to JSON. It could be a Root type.
-		fallthrough
-
-	case py.Tuple, py.List, py.Dict:
+	case py.Tuple, py.List, py.Dict, py.Unknown:
 		obj := root
 		// Convert to JSON bytes for now with Python's help ;) because YOLO
 		if py.PyObject_IsInstance(root, i.rootClass) == 1 {

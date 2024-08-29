@@ -13,6 +13,7 @@ var script = `
 import json
 this = json.loads(content().decode())
 root = json.dumps(this["thang"])
+meta["junk"] = "hey man"
 `
 
 func TestDifferentInterpreterModes(t *testing.T) {
@@ -55,6 +56,13 @@ func TestDifferentInterpreterModes(t *testing.T) {
 			}
 			if root != expected {
 				t.Fatalf("expected '%s', got '%s'\n", expected, root)
+			}
+			val, ok := newBatch[0].MetaGetMut("junk")
+			if !ok {
+				t.Fatal("expected meta to have 'junk' key")
+			}
+			if val != "hey man" {
+				t.Fatal("expected 'hey man', got ", val)
 			}
 		})
 	}

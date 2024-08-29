@@ -20,6 +20,8 @@ type SingleInterpreterRuntime struct {
 	ticket  InterpreterTicket // SingleInterpreterRuntime uses a single ticket.
 	started bool              // protected by globalMtx in runtime.go
 	logger  *service.Logger
+
+	references map[py.PyObjectPtr]int
 }
 
 func NewSingleInterpreterRuntime(exe string, logger *service.Logger) (*SingleInterpreterRuntime, error) {
@@ -36,6 +38,7 @@ func NewSingleInterpreterRuntime(exe string, logger *service.Logger) (*SingleInt
 		ticket: InterpreterTicket{
 			id: -1,
 		},
+		references: make(map[py.PyObjectPtr]int),
 	}, nil
 }
 
@@ -141,4 +144,28 @@ func (r *SingleInterpreterRuntime) Map(ctx context.Context, f func(token *Interp
 
 	_ = r.Release(token)
 	return err
+}
+
+func (r *SingleInterpreterRuntime) Reference(obj py.PyObjectPtr, ticket *InterpreterTicket) (int, error) {
+	if ticket.cookie != r.ticket.cookie {
+		return -1, errors.New("invalid interpreter ticket")
+	}
+	newCnt := r.references[obj] + 1
+	r.references[obj] = newCnt
+	py.Py_IncRef(obj)
+	return newCnt, nil
+}
+
+func (r *SingleInterpreterRuntime) Dereference(obj py.PyObjectPtr, ticket *InterpreterTicket) (int, error) {
+	if ticket.cookie != r.ticket.cookie {
+		return -1, errors.New("invalid interpreter ticket")
+	}
+
+	cnt := r.references[obj]
+	if cnt == 0 {
+		return -1, errors.New("reference count for object went negative")
+	}
+	r.references[obj] = cnt - 1
+	py.Py_DecRef(obj)
+	return r.references[obj], nil
 }

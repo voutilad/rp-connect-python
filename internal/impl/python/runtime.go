@@ -84,6 +84,14 @@ type Runtime interface {
 	// In the case of multiple interpreters, an error aborts mapping over the
 	// remainder.
 	Map(ctx context.Context, f func(ticket *InterpreterTicket) error) error
+
+	// Reference track a given Python object associated with the interpreter
+	// identified by the given *InterpreterTicket.
+	Reference(obj py.PyObjectPtr, ticket *InterpreterTicket) (int, error)
+
+	// Dereference a given Python object associated with the interpreter
+	// identified by the given *InterpreterTicket.
+	Dereference(obj py.PyObjectPtr, ticket *InterpreterTicket) (int, error)
 }
 
 // Initialize the main Python interpreter or increment the global count if

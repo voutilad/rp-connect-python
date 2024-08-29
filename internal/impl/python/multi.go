@@ -27,9 +27,10 @@ type MultiInterpreterRuntime struct {
 
 // State related to a Python Sub-interpreter.
 type subInterpreter struct {
-	state  py.PyInterpreterStatePtr // Interpreter State.
-	thread py.PyThreadStatePtr      // Original Python ThreadState.
-	id     int64                    // Unique identifier.
+	state      py.PyInterpreterStatePtr // Interpreter State.
+	thread     py.PyThreadStatePtr      // Original Python ThreadState.
+	id         int64                    // Unique identifier.
+	references map[py.PyObjectPtr]int
 }
 
 func NewMultiInterpreterRuntime(exe string, cnt int, legacyMode bool, logger *service.Logger) (*MultiInterpreterRuntime, error) {
@@ -150,28 +151,28 @@ func (r *MultiInterpreterRuntime) Acquire(ctx context.Context) (*InterpreterTick
 	}
 }
 
-func (r *MultiInterpreterRuntime) Release(token *InterpreterTicket) error {
+func (r *MultiInterpreterRuntime) Release(ticket *InterpreterTicket) error {
 	// Double-check the token is valid.
-	if token.idx < 0 || token.idx > len(r.interpreters) {
-		return errors.New("invalid token: bad index")
+	if ticket.idx < 0 || ticket.idx > len(r.interpreters) {
+		return errors.New("invalid ticket: bad index")
 	}
 
 	// Return the ticket to the pool. This should not block as the channel is
 	// buffered.
-	r.tickets <- token
+	r.tickets <- ticket
 
 	return nil
 }
 
-func (r *MultiInterpreterRuntime) Apply(token *InterpreterTicket, _ context.Context, f func() error) error {
+func (r *MultiInterpreterRuntime) Apply(ticket *InterpreterTicket, _ context.Context, f func() error) error {
 	// Double-check the token is valid.
-	if token.idx < 0 || token.idx > len(r.interpreters) {
-		return errors.New("invalid token: bad index")
+	if ticket.idx < 0 || ticket.idx > len(r.interpreters) {
+		return errors.New("invalid ticket: bad index")
 	}
 
-	interpreter := r.interpreters[token.idx]
-	if interpreter.id != token.id {
-		return errors.New("invalid token: bad interpreter id")
+	interpreter := r.interpreters[ticket.idx]
+	if interpreter.id != ticket.id {
+		return errors.New("invalid ticket: bad interpreter id")
 	}
 
 	// Pin our go routine & enter the context of the interpreter thread state.
@@ -260,8 +261,46 @@ func (r *MultiInterpreterRuntime) initSubInterpreter() (*subInterpreter, error) 
 	py.PyEval_SaveThread()
 
 	return &subInterpreter{
-		state:  state,
-		thread: ts,
-		id:     id,
+		state:      state,
+		thread:     ts,
+		id:         id,
+		references: make(map[py.PyObjectPtr]int),
 	}, nil
+}
+
+func (r *MultiInterpreterRuntime) Reference(obj py.PyObjectPtr, ticket *InterpreterTicket) (int, error) {
+	// Double-check the token is valid.
+	if ticket.idx < 0 || ticket.idx > len(r.interpreters) {
+		return -1, errors.New("invalid token: bad index")
+	}
+
+	interpreter := r.interpreters[ticket.idx]
+	if interpreter.id != ticket.id {
+		return -1, errors.New("invalid token: bad interpreter id")
+	}
+
+	newCnt := interpreter.references[obj] + 1
+	interpreter.references[obj] = newCnt
+	py.Py_IncRef(obj)
+	return newCnt, nil
+}
+
+func (r *MultiInterpreterRuntime) Dereference(obj py.PyObjectPtr, ticket *InterpreterTicket) (int, error) {
+	// Double-check the token is valid.
+	if ticket.idx < 0 || ticket.idx > len(r.interpreters) {
+		return -1, errors.New("invalid token: bad index")
+	}
+
+	interpreter := r.interpreters[ticket.idx]
+	if interpreter.id != ticket.id {
+		return -1, errors.New("invalid token: bad interpreter id")
+	}
+
+	cnt := interpreter.references[obj]
+	if cnt == 0 {
+		return -1, errors.New("reference count for object went negative")
+	}
+	interpreter.references[obj] = cnt - 1
+	py.Py_DecRef(obj)
+	return interpreter.references[obj], nil
 }
