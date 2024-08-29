@@ -26,10 +26,11 @@ const (
 )
 
 type PythonProcessor struct {
-	logger       *service.Logger
-	runtime      python.Runtime
-	interpreters map[int64]*interpreter
-	alive        atomic.Int32
+	logger         *service.Logger
+	runtime        python.Runtime
+	interpreters   map[int64]*interpreter
+	alive          atomic.Int32
+	serializerMode python.SerializerMode
 }
 
 type interpreter struct {
@@ -86,7 +87,11 @@ func init() {
 		Field(service.NewStringField("mode").
 			Description("Toggle different Python runtime modes.").
 			Examples(string(python.Global), string(python.Isolated), string(python.IsolatedLegacy)).
-			Default(string(python.Global)))
+			Default(string(python.Global))).
+		Field(service.NewStringField("serializer").
+			Description("Serialization mode to use on results.").
+			Examples(string(python.None), string(python.Pickle), string(python.Bloblang)).
+			Default(string(python.None)))
 	// TODO: linting rules for configuration fields
 
 	err := service.RegisterBatchProcessor("python", configSpec,
@@ -104,8 +109,13 @@ func init() {
 			if err != nil {
 				return nil, err
 			}
+			serializer, err := conf.FieldString("serializer")
+			if err != nil {
+				return nil, err
+			}
 
-			return NewPythonProcessor(exe, script, runtime.NumCPU(), python.StringAsMode(modeString), mgr.Logger())
+			return NewPythonProcessor(exe, script, runtime.NumCPU(), python.StringAsMode(modeString),
+				python.StringAsSerializerMode(serializer), mgr.Logger())
 		})
 	if err != nil {
 		// There's no way to fail initialization. We must panic. :(
@@ -118,7 +128,9 @@ func init() {
 //
 // This will create and initialize a new sub-interpreter from the main Python
 // Go routine and precompile some Python code objects.
-func NewPythonProcessor(exe, script string, cnt int, mode python.Mode, logger *service.Logger) (service.BatchProcessor, error) {
+func NewPythonProcessor(exe, script string, cnt int, mode python.Mode, serializer python.SerializerMode,
+	logger *service.Logger) (service.BatchProcessor, error) {
+
 	var err error
 	ctx := context.Background()
 
@@ -137,6 +149,9 @@ func NewPythonProcessor(exe, script string, cnt int, mode python.Mode, logger *s
 	if err != nil {
 		return nil, err
 	}
+
+	// TODO: should probably tie this logic into the runtime mode as they go hand-in-hand.
+	processor.serializerMode = serializer
 
 	// Start the runtime now to ferret out errors.
 	err = processor.runtime.Start(ctx)
@@ -364,6 +379,18 @@ func (p *PythonProcessor) ProcessBatch(ctx context.Context, batch service.Messag
 
 			// Shallow-copy before we mutate the message and metadata.
 			newMessage := m.Copy()
+
+			// TODO: XXX depending on serializer mode, handle things here.
+			switch p.serializerMode {
+			case python.None:
+			// passthrough
+			case python.Bloblang:
+			// TODO
+			case python.Pickle:
+			// TODO
+			default:
+				panic("invalid serializer mode")
+			}
 
 			drop, err := handleRoot(root, newMessage, i)
 			if drop {

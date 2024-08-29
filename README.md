@@ -81,7 +81,7 @@ the type of object you target when setting the `name` configuration property:
     to keep state between invocations.
 
 ### Input Serialization
-By default, the input will serialize data either as native Go values (in the 
+By default, the input will serialize data either as native Go values (in the
 case of `string`, `number`, `bytes`) and will convert to JSON in the case of
 Python container types `dict`, `list`, and `tuple`.
 
@@ -132,7 +132,7 @@ The `python` processor provides a similar experience to the `mapping` bloblang
 processor, but in pure Python. The interpreter that runs your code provides
 lazy hooks back into Redpanda Connect, to mimic bloblang behavior:
 
-- `content()` -- similar to the bloblang function, it returns the `bytes` of 
+- `content()` -- similar to the bloblang function, it returns the `bytes` of
   a message. This performs a lazy copy of raw bytes into the interpreter.
 
 - `metadata(key)` -- similar to the bloblang function, it provides access to
@@ -146,7 +146,7 @@ lazy hooks back into Redpanda Connect, to mimic bloblang behavior:
     `root`, it loses its magic properties!)
 
 > Heads up!
-> 
+>
 > If using the bloblang-like assignment, it will create the hierarchy of keys
 > similar to in bloblang. `root.name.first = "Dave" will work even if "name"
 > hasn't been assigned yet, producing a dict like:
@@ -154,7 +154,7 @@ lazy hooks back into Redpanda Connect, to mimic bloblang behavior:
 > root = { "name": { "first": "Dave" } }
 > ```
 
-For the details of how `root` works, see the `Root` Python 
+For the details of how `root` works, see the `Root` Python
 [class](./processor/globals.py).
 
 Additionally, the following helper functions and objects improve
@@ -176,9 +176,9 @@ pipeline:
           # these are logically equivalent
           import pickle
           this = pickle.loads(content())
-          
+
           this = unpickle()
-          
+
           root = this.call_some_method()
 
           # if relying on Redpanda Connect structured data, use JSON.
@@ -302,30 +302,37 @@ http:
 `rp-connect-python` now supports multiple interpreter modes that may be set
 separately on each `input`, `processor`, and `output` instance.
 
-- `legacy`
-  - Uses multiple sub-interpreters, but configured to use the shared GIL and 
-    memory allocator.
-  - Balances compatability with performance, but not all Python modules
-    support sub-interpreters.
-
-- `multi`
-  - Uses multiple sub-interpreters with their own memory allocators and GILs.
-  - Provides the best throughput performance for pure-Python use cases that
-    don't leverage Python modules that use native code (e.g. `numpy`).
-
-- `single`
-  - Uses a global interpreter (i.e. no sub-interpreters) for all execution. 
+- `global`
+  - Uses a global interpreter (i.e. no sub-interpreters) for all execution.
+  - Allows passing pointers to Python objects between components, avoiding
+    costly serialization/deserialization.
   - Provides the most compatability at expense of throughput as your code will
     rely on the global main interpreter for memory management and the GIL.
 
+- `isolated`
+  - Uses multiple isolated sub-interpreters with their own memory allocators
+    and GILs.
+  - Provides the best throughput performance for pure-Python use cases that
+    don't leverage Python modules that use native code (e.g. `numpy`).
+  - Require serializing/deserializing data as it leaves the context of the
+    interpreter.
+
+- `isolated_legacy`
+  - Same as `isolated`, but instead of distinct GIL and memory allocators, uses
+    a shared GIL and allocator.
+  - Balances compatability with performance. Some Python modules might not
+    support full isolation, but _will_ work in a shared GIL mode.
+
+
 A more detailed discussion for the nerds follows.
 
-### Multi & Legacy Modes
-Most pure Python code should "just work" with `multi` mode and `legacy`
-mode. Some older Python extensions, written in C or the like, may not
-work in `multi` mode and require `legacy` mode.
+### Isolated & Isolated Legacy Modes
+Most pure Python code should "just work" with `isolated` mode and
+`isolated_legacy` mode. Some older Python extensions, written in C or the
+like, may not work in `isolated` mode and require `isolated_legacy` mode.
 
-If you see issues using `multi` (e.g. crashes), switch to `legacy`.
+If you see issues using `isolated` (e.g. crashes), switch to
+`isolated_legacy`.
 
 > In general, crashes should _not_ happen. The most common causes are bugs
 > in `rp-connect-python` related to _use-after-free_'s in the Python
@@ -335,20 +342,20 @@ If you see issues using `multi` (e.g. crashes), switch to `legacy`.
 > by switching modes (e.g. to "legacy"), it's possible it's deeper than just
 > `rp-connect-python`.
 
-In some cases, `legacy` can perform as well or _slightly better_ than
-`multi` even though it uses a single GIL. It's very workload dependent, so
+In some cases, `isolated_legacy` can perform as well or _slightly better_ than
+`isolated` even though it uses a shared GIL. It's very workload dependent, so
 it's worth experimenting.
 
-### Single Mode
-Using `single` mode for a runtime will execute the Python code in the
-context of the "main" interpreter. (In `multi` and `legacy` modes,
-sub-interpreters derive from the "main" interpreter.) This is akin to simply
-embedding Python into an application.
+### Global Mode
+Using `glopbal` mode for a runtime will execute the Python code in the
+context of the "main" interpreter. (In `isolated` and `isolated_legacy` modes,
+sub-interpreters derive from the "main" interpreter.) This is the traditional
+method of embedding Python into an application.
 
-While you may scale out your `single` mode components, only a single
-component instance may utilize the "main" interpreter at a time. (Hence, the
-name `single`.) This is irrespective of the GIL as Python's C implementation
-relies heavily on thread-local storage for interpreter state.
+While you may scale out your `global` mode components, only a single
+component instance may utilize the "main" interpreter at a time. This is
+irrespective of the GIL as Python's C implementation relies heavily on
+thread-local storage for interpreter state.
 
 > Go was design by people that think programmers can't handle managing
 > threads. (Multi-threading is hard, but that's why we're paid the big
@@ -359,11 +366,25 @@ relies heavily on thread-local storage for interpreter state.
 > couple Python's thread-oriented approach with Go's go-routine world.
 
 A lot of scientific software that uses external non-Python native code
-may run best in `single` mode. This includes, but is not limited to:
+may run best in `global` mode. This includes, but is not limited to:
 
 - `numpy`
 - `pandas`
 - `pyarrow`
+
+A benefit to `global` mode is it's one interpreter state across all components,
+so you can create a Python object in one component (e.g. an `input`) and
+easily use it in a `processor` stage without mucking about with serialization.
+This is great for workloads that create large, in-memory objects, like Pandas
+DataFrames or PyArrow Tables. In these cases, avoiding serialization may mean
+`global` mode is more efficient even if there's fighting over the interpreter
+lock.
+
+> The current design assumes arbitrary Go routines will need to acquire
+> ownership of the global ("main") interpreter and fight over a mutex. It's
+> entirely possible the mutex is held at points where the GIL is actually
+> released or releasable, meaning other Python code _could_ run safely. It's
+> future work to figure out how to orchestrate this efficiently.
 
 ## Python Compatability
 This is en evolving list of notes/tips related to using certain
