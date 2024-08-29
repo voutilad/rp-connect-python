@@ -14,7 +14,7 @@ output:
 pipeline:
   processors:
     - python:
-        mode: multi
+        mode: isolated
         script: |
           # Return a lowercase version.
           msg = content().decode()
@@ -22,7 +22,7 @@ pipeline:
           # Set a metadata value.
           meta["key"] = "a string value"
     - python:
-        mode: legacy
+        mode: isolated_legacy
         script: |
           # Filter to just A-Za-z.
           msg = content().decode()
@@ -30,7 +30,7 @@ pipeline:
           # Set a complex metadata value and read existing metadata.
           meta["complex"] = {"name": "Dave", "key": metadata("key")}
     - python:
-        mode: single
+        mode: global
         script: |
           # Compute letter frequency and report most common.
           letters = content().decode()

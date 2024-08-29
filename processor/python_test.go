@@ -22,7 +22,7 @@ func TestDifferentInterpreterModes(t *testing.T) {
 		"other": 123,
 	}
 
-	for _, m := range []python.Mode{python.MultiMode, python.LegacyMode, python.SingleMode} {
+	for _, m := range []python.Mode{python.Isolated, python.IsolatedLegacy, python.Global} {
 		t.Run(string(m), func(t *testing.T) {
 			proc, err := NewPythonProcessor("python3", script, runtime.NumCPU(), m, nil)
 			if err != nil {

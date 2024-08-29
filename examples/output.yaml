@@ -7,6 +7,7 @@ input:
 
 output:
   python:
+    mode: isolated
     script: |
       msg = content().decode()
       print(f"you said: '{msg}'")

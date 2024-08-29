@@ -58,7 +58,7 @@ var configSpec = service.NewConfigSpec().
 		Default(1)).
 	Field(service.NewStringField("mode").
 		Description("Toggle different Python runtime modes: 'multi', 'single', and 'legacy' (the default)").
-		Default(string(python.LegacyMode)))
+		Default(string(python.IsolatedLegacy)))
 
 func noOpAckFn(_ context.Context, _ error) error { return nil }
 
@@ -103,11 +103,11 @@ func newPythonInput(exe, script, name string, batchSize int, pickle bool, mode p
 	var r python.Runtime
 
 	switch mode {
-	case python.LegacyMode:
+	case python.IsolatedLegacy:
 		r, err = python.NewMultiInterpreterRuntime(exe, 1, true, logger)
-	case python.SingleMode:
+	case python.Global:
 		r, err = python.NewSingleInterpreterRuntime(exe, logger)
-	case python.MultiMode:
+	case python.Isolated:
 		r, err = python.NewMultiInterpreterRuntime(exe, 1, false, logger)
 	default:
 		return nil, errors.New("invalid mode")

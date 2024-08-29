@@ -8,7 +8,7 @@ input:
 pipeline:
   processors:
     - python:
-        exe: python3
+        mode: isolated
         script: |
           root.all = metadata()
           root.path = metadata("path")

@@ -84,8 +84,9 @@ func init() {
 			Description("Path to a Python executable.").
 			Default("python3")).
 		Field(service.NewStringField("mode").
-			Description("Toggle different Python runtime modes: 'multi', 'single', and 'legacy' (the default)").
-			Default(string(python.LegacyMode)))
+			Description("Toggle different Python runtime modes.").
+			Examples(string(python.Global), string(python.Isolated), string(python.IsolatedLegacy)).
+			Default(string(python.Global)))
 	// TODO: linting rules for configuration fields
 
 	err := service.RegisterBatchProcessor("python", configSpec,
@@ -124,11 +125,11 @@ func NewPythonProcessor(exe, script string, cnt int, mode python.Mode, logger *s
 	// Spin up our runtime.
 	var processor *PythonProcessor
 	switch mode {
-	case python.MultiMode:
+	case python.Isolated:
 		processor, err = newMultiRuntimeProcessor(exe, cnt, logger)
-	case python.LegacyMode:
+	case python.IsolatedLegacy:
 		processor, err = newLegacyRuntimeProcessor(exe, cnt, logger)
-	case python.SingleMode:
+	case python.Global:
 		processor, err = newSingleRuntimeProcessor(exe, logger)
 	default:
 		return nil, errors.New("invalid mode")

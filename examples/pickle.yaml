@@ -22,7 +22,6 @@ input:
 pipeline:
   processors:
     - python:
-        mode: multi # pickle doesn't like legacy mode!?
         script: |
           import pickle
           from hashlib import sha256

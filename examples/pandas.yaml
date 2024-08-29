@@ -10,7 +10,6 @@ input:
 pipeline:
   processors:
     - python:
-        mode: single
         script: |
           import pickle
           df = unpickle()

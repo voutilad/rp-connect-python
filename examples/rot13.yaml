@@ -5,7 +5,6 @@ input:
 pipeline:
   processors:
     - python:
-        exe: python3
         script: |
           import codecs
           msg = content().decode()

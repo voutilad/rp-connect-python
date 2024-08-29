@@ -8,7 +8,6 @@ pipeline:
   processors:
     - python:
         exe: ./venv/bin/python3
-        mode: single
         script: |
           from PIL import Image
           from io import BytesIO

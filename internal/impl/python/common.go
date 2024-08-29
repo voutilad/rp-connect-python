@@ -5,20 +5,20 @@ import "strings"
 type Mode string
 
 const (
-	MultiMode   Mode = "multi"
-	SingleMode  Mode = "single"
-	LegacyMode  Mode = "legacy"
-	InvalidMode Mode = "invalid"
+	Isolated       Mode = "isolated"
+	Global         Mode = "global"
+	IsolatedLegacy Mode = "isolated_legacy"
+	InvalidMode    Mode = "invalid"
 )
 
 func StringAsMode(s string) Mode {
 	switch strings.ToLower(s) {
-	case string(MultiMode):
-		return MultiMode
-	case string(SingleMode):
-		return SingleMode
-	case string(LegacyMode):
-		return LegacyMode
+	case string(Isolated):
+		return Isolated
+	case string(Global):
+		return Global
+	case string(IsolatedLegacy):
+		return IsolatedLegacy
 	default:
 		return InvalidMode
 	}

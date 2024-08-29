@@ -16,7 +16,7 @@ var configSpec = service.NewConfigSpec().
 		Default("python3")).
 	Field(service.NewStringField("mode").
 		Description("Toggle different Python runtime modes: 'multi', 'single', and 'legacy' (the default)").
-		Default(string(python.LegacyMode)))
+		Default(string(python.IsolatedLegacy)))
 
 type pythonOutput struct {
 	logger    *service.Logger
