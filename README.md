@@ -99,7 +99,7 @@ input:
   python:
     pickle: false     # Enable pickle serializer
     batch_size: 1     # How many messages to include in a single message batch.
-    mode: legacy      # Interpreter mode (one of "multi", "single", "legacy")
+    mode: global      # Interpreter mode (one of "global", "isolated", "isolated_legacy")
     exe: "python3"    # Name of python binary to use.
     name:             # No default (required), name of generating local object.
     script:           # No default (required), Python code to execute.
@@ -200,7 +200,7 @@ pipeline:
   processors:
     - python:
         exe: "python3"  # Name of python binary to use.
-        mode: "legacy"  # Interpreter mode (one of "multi", "single", "legacy")
+        mode: "global"  # Interpreter mode (one of "global", "isolated", "isolated_legacy")
         script:         # No default (required), Python script to execute
 ```
 
@@ -302,7 +302,7 @@ http:
 `rp-connect-python` now supports multiple interpreter modes that may be set
 separately on each `input`, `processor`, and `output` instance.
 
-- `global`
+- `global` (the default)
   - Uses a global interpreter (i.e. no sub-interpreters) for all execution.
   - Allows passing pointers to Python objects between components, avoiding
     costly serialization/deserialization.
@@ -391,22 +391,22 @@ This is en evolving list of notes/tips related to using certain
 popular Python modules:
 
 ### `requests`
-Works best in `legacy` mode. Known to cause deadlocks on shutdown
-in `single` mode. Currently, can panic `multi` mode on some systems.
+Works best in `isolated_legacy` mode. Currently, can panic `isolated` mode on
+some systems.
 
 > While `requests` is pure Python, it does hook into some modules that
 > are not. Still identifying a race condition causing memory corruption
-> in `multi` mode.
+> in `isolated` mode.
 
 ### `numpy`
-Recommends `single` mode as explicitly does not support Python
-sub-interpreters (_a la_ `multi` or `legacy` modes). May work in
-`legacy`, but be careful.
+Recommends `global` mode as explicitly does not support Python
+sub-interpreters. May work in `isolated_legacy`, but be careful.
 
 ### `pandas`
-Depends on `numpy`, so might be best used in `single` mode if stability is a
+Depends on `numpy`, so might be best used in `global` mode if stability is a
 concern. Works fine with the `pickle` support for passing DataFrames, but might
-not be the most efficient way for passing data around a long pipeline.
+not be the most efficient way for passing data around a long pipeline, so
+`global` might be preferable to isolated modes.
 
 An [example](./examples/pandas.yaml) that shows filtering a DataFrame and using
 `pickle` to pass it from the `input` to the `processor`:
@@ -414,7 +414,7 @@ An [example](./examples/pandas.yaml) that shows filtering a DataFrame and using
 ```yaml
 input:
   python:
-    mode: single
+    mode: global
     name: df
     pickle: true
     script: |
@@ -424,7 +424,7 @@ input:
 pipeline:
   processors:
     - python:
-        mode: single
+        mode: global
         script: |
           import pickle
           df = unpickle()
@@ -434,15 +434,15 @@ output:
   stdout: {}
 ```
 
-> Note the use of `mode: single`!
+> Note the use of `mode: global`!
 
 ### `pyarrow`
-Works fine in `single` mode. Might provide a better means of accessing large
+Works fine in `global` mode. Might provide a better means of accessing large
 datasets lazily vs. Pandas.
 
 ### `pillow`
-Seems to work ok in `legacy` mode, but doesn't support sub-interpreters,
-so recommended to run in `single` mode.
+Seems to work ok in `isolated_legacy` mode, but doesn't support
+sub-interpreters, so recommended to run in `global` mode.
 
 An example of a directory scanner that identifies types of JPEGs:
 
@@ -457,7 +457,7 @@ pipeline:
   processors:
     - python:
         exe: ./venv/bin/python3
-        mode: single
+        mode: global
         script: |
           from PIL import Image
           from io import BytesIO
@@ -491,7 +491,7 @@ $  ./rp-connect-python run --log.level=off examples/pillow.yaml
     - Not expected to work on Windows. Requires `gogopython` updates.
 - You can only use one Python binary across all Python processors.
 - Hardcoded still for Python 3.12. Should be portable to 3.13 and,
-  in cases of `single` mode, earlier versions. Requires changes to
+  in cases of `global` mode, earlier versions. Requires changes to
   `gogopython` I haven't made yet.
 
 
