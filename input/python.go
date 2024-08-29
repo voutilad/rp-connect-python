@@ -5,11 +5,10 @@ import (
 	_ "embed"
 	"errors"
 	"fmt"
-	py "github.com/voutilad/gogopython"
-	"unsafe"
-
 	"github.com/redpanda-data/benthos/v4/public/service"
+	py "github.com/voutilad/gogopython"
 	"github.com/voutilad/rp-connect-python/internal/impl/python"
+	"unsafe"
 )
 
 type inputMode int
@@ -23,16 +22,18 @@ const (
 )
 
 type pythonInput struct {
-	logger        *service.Logger
-	runtime       python.Runtime
-	generator     py.PyObjectPtr
-	mode          inputMode
-	globals       py.PyObjectPtr
-	code          py.PyCodeObjectPtr
-	serializer    *python.Serializer
+	logger    *service.Logger
+	runtime   python.Runtime
+	generator py.PyObjectPtr
+	mode      inputMode
+	globals   py.PyObjectPtr
+	code      py.PyCodeObjectPtr
+
+	serializer     *python.Serializer
+	serializerMode python.SerializerMode
+
 	args          py.PyObjectPtr
 	kwargs        py.PyObjectPtr
-	pickle        bool
 	script        string
 	generatorName string
 	idx           int64
@@ -50,15 +51,17 @@ var configSpec = service.NewConfigSpec().
 	Field(service.NewStringField("name").
 		Description("Name of python function to call or object to read for generating data.").
 		Default("read")).
-	Field(service.NewBoolField("pickle").
-		Description("Whether to serialize data with pickle.").
-		Default(false)).
 	Field(service.NewIntField("batch_size").
 		Description("Size of batches to generate.").
 		Default(1)).
 	Field(service.NewStringField("mode").
-		Description("Toggle different Python runtime modes: 'multi', 'single', and 'legacy' (the default)").
-		Default(string(python.IsolatedLegacy)))
+		Description("Toggle different Python runtime modes.").
+		Examples(string(python.Global), string(python.Isolated), string(python.IsolatedLegacy)).
+		Default(string(python.Global))).
+	Field(service.NewStringField("serializer").
+		Description("Serialization mode to use on results.").
+		Examples(string(python.None), string(python.Pickle), string(python.Bloblang)).
+		Default(string(python.Bloblang)))
 
 func noOpAckFn(_ context.Context, _ error) error { return nil }
 
@@ -74,7 +77,7 @@ func init() {
 			if err != nil {
 				return nil, err
 			}
-			modeString, err := conf.FieldString("mode")
+			mode, err := conf.FieldString("mode")
 			if err != nil {
 				return nil, err
 			}
@@ -82,15 +85,15 @@ func init() {
 			if err != nil {
 				return nil, err
 			}
-			pickle, err := conf.FieldBool("pickle")
-			if err != nil {
-				return nil, err
-			}
 			batchSize, err := conf.FieldInt("batch_size")
 			if err != nil {
 				return nil, err
 			}
-			return newPythonInput(exe, script, name, batchSize, pickle, python.StringAsMode(modeString), mgr.Logger())
+			serializerMode, err := conf.FieldString("serializer")
+			if err != nil {
+				return nil, err
+			}
+			return newPythonInput(exe, script, name, batchSize, python.StringAsMode(mode), python.StringAsSerializerMode(serializerMode), mgr.Logger())
 		})
 
 	if err != nil {
@@ -98,9 +101,16 @@ func init() {
 	}
 }
 
-func newPythonInput(exe, script, name string, batchSize int, pickle bool, mode python.Mode, logger *service.Logger) (service.BatchInput, error) {
+func newPythonInput(exe, script, name string, batchSize int, mode python.Mode, serializer python.SerializerMode, logger *service.Logger) (service.BatchInput, error) {
 	var err error
 	var r python.Runtime
+
+	// XXX for now, enforce that we only support non-serializing modes when
+	// using a global interpreter mode.
+	if serializer == python.None && mode != python.Global {
+		return nil,
+			errors.New("isolated interpreters require bloblang or pickle serialization")
+	}
 
 	switch mode {
 	case python.IsolatedLegacy:
@@ -118,13 +128,13 @@ func newPythonInput(exe, script, name string, batchSize int, pickle bool, mode p
 
 	// TODO: do we want nacks?
 	return &pythonInput{
-		logger:        logger,
-		runtime:       r,
-		script:        script,
-		generatorName: name,
-		pickle:        pickle,
-		batchSize:     batchSize,
-		boundsHint:    -1,
+		logger:         logger,
+		runtime:        r,
+		script:         script,
+		generatorName:  name,
+		batchSize:      batchSize,
+		boundsHint:     -1,
+		serializerMode: serializer,
 	}, nil
 }
 
@@ -182,17 +192,22 @@ func (p *pythonInput) Connect(ctx context.Context) error {
 		switch t := py.BaseType(obj); t {
 		case py.Generator:
 			p.mode = Iterable
+			p.logger.Debug("generating data from an iterable")
 		case py.List:
 			p.mode = List
 			p.boundsHint = py.PyList_Size(obj)
+			p.logger.Debug("generating data from list")
 		case py.Tuple:
 			p.mode = Tuple
 			p.boundsHint = py.PyTuple_Size(obj)
+			p.logger.Debug("generating data from a tuple")
 		case py.Function:
 			p.mode = Callable
+			p.logger.Debug("generating data from a callable")
 		default:
 			p.mode = Object
 			p.boundsHint = 1
+			p.logger.Debug("generating data from a single object")
 		}
 		p.generator = obj
 
@@ -219,16 +234,17 @@ func (p *pythonInput) ReadBatch(ctx context.Context) (service.MessageBatch, serv
 	}
 	defer func() { _ = p.runtime.Release(ticket) }()
 
-	batch := make(service.MessageBatch, p.batchSize)
-	idx := 0
+	batch := service.MessageBatch{}
+	var objs []py.PyObjectPtr
 
 	err = p.runtime.Apply(ticket, ctx, func() error {
 		next := py.NullPyObjectPtr
 
 		// TODO: add a flush timeout? Right now we fill a batch.
-		for ; idx < p.batchSize; idx++ {
+		for idx := 0; idx < p.batchSize; idx++ {
 			needsDecref := false
 
+			// Extract the next object to feed into the pipeline.
 			switch p.mode {
 			case Object:
 				if p.idx >= p.boundsHint {
@@ -283,53 +299,36 @@ func (p *pythonInput) ReadBatch(ctx context.Context) (service.MessageBatch, serv
 				panic("unhandled input mode")
 			}
 
-			switch py.BaseType(next) {
-			case py.None:
-				return nil
+			// Based on serializer mode, determine how we package up the object
+			// before sending our batch.
+			var m *service.Message
+			switch p.serializerMode {
+			case python.None:
+				// We need to take a global reference to keep our object alive.
+				_, _ = p.runtime.Reference(next, ticket)
+				objs = append(objs, next)
+				m = service.NewMessage(nil)
+				m.SetStructured(next)
+			case python.Bloblang:
+				m, err = toBloblang(next, p.serializer)
+			case python.Pickle:
+				m, err = toPickle(next, p.serializer)
+			}
+			if err != nil {
+				// TODO: drop this message?
+				panic(err)
+			}
 
-			case py.Long:
-				// TODO: overflow (signed vs. unsigned)
-				long := py.PyLong_AsLong(next)
-				m := service.NewMessage([]byte{})
-				m.SetStructured(long)
-				batch[idx] = m
+			if m != nil {
+				// Tag the message with information on how it was serialized.
+				m.MetaSetMut(python.SerializerMetaKey, p.serializerMode)
 
-			case py.Float:
-				float := py.PyFloat_AsDouble(next)
-				m := service.NewMessage([]byte{})
-				m.SetStructured(float)
-				batch[idx] = m
-
-			case py.String:
-				s, decodeErr := py.UnicodeToString(next)
-				if decodeErr != nil {
-					panic("failed to decode python input string")
-				}
-				batch[idx] = service.NewMessage([]byte(s))
-
-			case py.Bytes:
-				// Copy out the bytes.
-				bytes := py.PyBytes_AsString(next)
-				sz := py.PyBytes_Size(next)
-				buffer := make([]byte, sz)
-				copy(buffer, unsafe.Slice(bytes, sz))
-				batch[idx] = service.NewMessage(buffer)
-
-			case py.Tuple, py.List, py.Dict, py.Unknown:
-				// Use the serializer.
-				var buffer []byte
-				if p.pickle {
-					buffer, err = p.serializer.Pickle(next)
-				} else {
-					buffer, err = p.serializer.JsonBytes(next)
-				}
-				if err != nil {
-					panic(err)
-				}
-				batch[idx] = service.NewMessage(buffer)
+				// Add it to our batch.
+				batch = append(batch, m)
 			}
 
 			if needsDecref {
+				// Drop any local references we took in the loop.
 				py.Py_DecRef(next)
 			}
 		}
@@ -337,25 +336,107 @@ func (p *pythonInput) ReadBatch(ctx context.Context) (service.MessageBatch, serv
 		return nil
 	})
 
-	if idx == 0 || err != nil {
+	if len(batch) == 0 || err != nil {
 		return nil, nil, service.ErrEndOfInput
 	}
 
 	// TODO: should we return service.ErrEndOfInput here, too, if we know
 	//       that we're finished?
-	return batch[0:idx], noOpAckFn, nil
+	return batch, newAckCallback(p.runtime, objs), nil
+}
+
+// newAckCallback captures the current python.Runtime and the list of Python
+// objects produced by a pythonInput. It's used for releasing a global
+// reference for each produced Python object once acknowledged by the output.
+func newAckCallback(runtime python.Runtime, objs []py.PyObjectPtr) service.AckFunc {
+	return func(ctx context.Context, err error) error {
+		// Our ack function callback needs to grab an interpreter, so get a
+		// ticket.
+		t, err := runtime.Acquire(ctx)
+		if err != nil {
+			// XXX panic for now...no way to recover.
+			panic(err)
+		}
+		defer func() { _ = runtime.Release(t) }()
+
+		// Drop a reference for each globally tracked object. This might free
+		// them, but at this point the output should have processed them.
+		for _, obj := range objs {
+			_, err := runtime.Dereference(obj, t)
+			if err != nil {
+				// XXX panic for now...not sure how to recover.
+				panic(err)
+			}
+		}
+		return nil
+	}
 }
 
 func (p *pythonInput) Close(ctx context.Context) error {
-	_ = p.runtime.Map(ctx, func(_ *python.InterpreterTicket) error {
+	_ = p.runtime.Map(ctx, func(ticket *python.InterpreterTicket) error {
 		// Even if one of these are null, Py_DecRef is fine being passed NULL.
 		py.Py_DecRef(p.generator)
 		py.Py_DecRef(p.globals)
 		py.Py_DecRef(p.args)
 		py.Py_DecRef(p.kwargs)
 		p.serializer.DecRef()
+
 		return nil
 	})
 
 	return p.runtime.Stop(ctx)
+}
+
+func toBloblang(obj py.PyObjectPtr, serializer *python.Serializer) (*service.Message, error) {
+	var m *service.Message
+	switch py.BaseType(obj) {
+	case py.None:
+		return nil, nil
+
+	case py.Long:
+		// TODO: overflow (signed vs. unsigned)
+		long := py.PyLong_AsLong(obj)
+		m = service.NewMessage([]byte{})
+		m.SetStructured(long)
+
+	case py.Float:
+		float := py.PyFloat_AsDouble(obj)
+		m = service.NewMessage([]byte{})
+		m.SetStructured(float)
+
+	case py.String:
+		s, decodeErr := py.UnicodeToString(obj)
+		if decodeErr != nil {
+			panic("failed to decode python input string")
+		}
+		m = service.NewMessage([]byte(s))
+
+	case py.Bytes:
+		// Copy out the bytes.
+		bytes := py.PyBytes_AsString(obj)
+		sz := py.PyBytes_Size(obj)
+		buffer := make([]byte, sz)
+		copy(buffer, unsafe.Slice(bytes, sz))
+		m = service.NewMessage(buffer)
+
+	case py.Tuple, py.List, py.Dict, py.Unknown:
+		// Use the serializer.
+		buffer, err := serializer.JsonBytes(obj)
+
+		if err != nil {
+			panic(err)
+		}
+		m = service.NewMessage(buffer)
+	}
+
+	return m, nil
+}
+
+func toPickle(obj py.PyObjectPtr, serializer *python.Serializer) (*service.Message, error) {
+	pickled, err := serializer.Pickle(obj)
+	if err != nil {
+		return nil, err
+	}
+
+	return service.NewMessage(pickled), nil
 }

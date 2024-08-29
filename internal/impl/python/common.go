@@ -52,4 +52,4 @@ func StringAsSerializerMode(s string) SerializerMode {
 	}
 }
 
-const PythonSerializerMetaKey = "_python_serializer"
+const SerializerMetaKey = "_python_serializer"

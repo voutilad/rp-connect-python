@@ -15,8 +15,13 @@ var configSpec = service.NewConfigSpec().
 		Description("Path to a Python executable.").
 		Default("python3")).
 	Field(service.NewStringField("mode").
-		Description("Toggle different Python runtime modes: 'multi', 'single', and 'legacy' (the default)").
-		Default(string(python.IsolatedLegacy)))
+		Description("Toggle different Python runtime modes.").
+		Examples(string(python.Global), string(python.Isolated), string(python.IsolatedLegacy)).
+		Default(string(python.Global))).
+	Field(service.NewStringField("serializer").
+		Description("Serialization mode to use on results.").
+		Examples(string(python.None), string(python.Pickle), string(python.Bloblang)).
+		Default(string(python.Bloblang)))
 
 type pythonOutput struct {
 	logger    *service.Logger
@@ -43,10 +48,13 @@ func init() {
 			}
 
 			p, err := processor.NewPythonProcessor(exe, script, 1, python.StringAsMode(modeString), python.Bloblang, mgr.Logger())
+			if err != nil {
+				return nil, policy, 0, err
+			}
 			return &pythonOutput{
 				logger:    mgr.Logger(),
 				processor: p,
-			}, policy, 1, err
+			}, policy, 1, nil
 		})
 
 	if err != nil {

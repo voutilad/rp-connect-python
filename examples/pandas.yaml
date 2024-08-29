@@ -1,8 +1,7 @@
 input:
   python:
-    mode: single
     name: df
-    pickle: true
+    serializer: none
     script: |
       import pandas as pd
       df = pd.DataFrame.from_dict({"name": ["Maple", "Moxie"], "age": [8, 3]})
@@ -11,9 +10,7 @@ pipeline:
   processors:
     - python:
         script: |
-          import pickle
-          df = unpickle()
-          root = df.to_dict("list")
+          root = this.to_dict("list")
 
 output:
   stdout: {}

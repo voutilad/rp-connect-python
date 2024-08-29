@@ -1,11 +1,10 @@
 input:
   python:
     name: pickle_the_time
-    pickle: true
     batch_size: 5
+    serializer: pickle
     script: |
       def pickle_the_time(state = {}):
-        import pickle
         import time
       
         cnt = state.get("cnt", 0)
@@ -22,6 +21,7 @@ input:
 pipeline:
   processors:
     - python:
+        mode: isolated
         script: |
           import pickle
           from hashlib import sha256
@@ -34,11 +34,8 @@ pipeline:
 
 output:
   python:
-    script: |
-      import pickle
-      
-      msg = content()
-      d = pickle.loads(msg)
+    script: |      
+      d = unpickle()
       print(d)
 
 http:

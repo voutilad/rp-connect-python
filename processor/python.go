@@ -344,15 +344,10 @@ func (p *PythonProcessor) ProcessBatch(ctx context.Context, batch service.Messag
 	// Look up our previously initialized interpreter state.
 	i := p.interpreters[ticket.Id()]
 
-	// At the moment, we only do 1:1 transformations and the script cannot
-	// produce new batches from a single message.
-	newBatch := make(service.MessageBatch, len(batch))
-	idx := 0
+	newBatch := service.MessageBatch{}
 
 	err = p.runtime.Apply(ticket, ctx, func() error {
-		for ; idx < len(batch); idx++ {
-			m := batch[idx]
-
+		for _, m := range batch {
 			// Clear out any local state from previous messages.
 			py.PyDict_Clear(i.meta)
 			py.PyObject_CallNoArgs(i.rootClear)
@@ -373,9 +368,12 @@ func (p *PythonProcessor) ProcessBatch(ctx context.Context, batch service.Messag
 			// If the incoming message was from a previous Python component,
 			// see if it passed us a Python object. If so, we use it for
 			// creating "this".
-			this, thisExists := m.MetaGetMut(python.PythonSerializerMetaKey)
-			if thisExists {
-				p.logger.Info("XXX setting this")
+			mode, ok := m.MetaGetMut(python.SerializerMetaKey)
+			if ok && mode.(python.SerializerMode) == python.None {
+				this, err := m.AsStructured()
+				if err != nil {
+					panic(err)
+				}
 				py.PyDict_SetItemString(i.locals, "this", this.(py.PyObjectPtr))
 			}
 
@@ -417,8 +415,7 @@ func (p *PythonProcessor) ProcessBatch(ctx context.Context, batch service.Messag
 				// We don't serialize and instead pass a Python object pointer.
 				if py.BaseType(root) == py.None {
 					// Drop the message.
-					p.logger.Info("XXX dropping")
-
+					// TODO: Is this correct? To drop do we just not output a new message?
 					continue
 				} else {
 					// XXX validate we're using global interpreter mode?
@@ -432,7 +429,6 @@ func (p *PythonProcessor) ProcessBatch(ctx context.Context, batch service.Messag
 				drop, err := handleRootAsJson(root, newMessage, i)
 				if drop {
 					// TODO: Is this correct? To drop do we just not output a new message?
-					p.logger.Info("XXX dropping")
 					continue
 				}
 				if err != nil {
@@ -450,16 +446,17 @@ func (p *PythonProcessor) ProcessBatch(ctx context.Context, batch service.Messag
 				}
 			}
 
-			newBatch[idx] = newMessage
+			newMessage.MetaSetMut(python.SerializerMetaKey, p.serializerMode)
+			newBatch = append(newBatch, newMessage)
 		}
 		return nil
 	})
 
-	if idx == 0 || err != nil {
+	if len(newBatch) == 0 || err != nil {
 		return nil, err
 	}
 
-	return []service.MessageBatch{newBatch[0:idx]}, err
+	return []service.MessageBatch{newBatch}, err
 }
 
 func handleRootAsPickle(root py.PyObjectPtr, m *service.Message, i *interpreter) (bool, error) {

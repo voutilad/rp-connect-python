@@ -1,0 +1,33 @@
+input:
+  python:
+    name: objects
+    serializer: none
+    script: |
+      class Junk:
+        def __init__(self, msg):
+          self.msg = msg
+      
+        def speak(self):
+          return f"i said: {self.msg}"
+      
+      objects = iter([
+        Junk("hey man"),
+        Junk("how's it going?"),
+      ])
+
+pipeline:
+  processors:
+    - python:
+        script: |
+          try:
+            # this should be our Junk instance from the input
+            root.msg = this.speak()
+            root.err = None
+          except Exception as e:
+            root.err = str(e)
+
+output:
+  stdout: {}
+
+http:
+  enabled: false

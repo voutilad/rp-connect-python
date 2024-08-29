@@ -281,7 +281,11 @@ func (r *MultiInterpreterRuntime) Reference(obj py.PyObjectPtr, ticket *Interpre
 
 	newCnt := interpreter.references[obj] + 1
 	interpreter.references[obj] = newCnt
+
+	runtime.LockOSThread()
 	py.Py_IncRef(obj)
+	runtime.UnlockOSThread()
+
 	return newCnt, nil
 }
 
@@ -301,6 +305,10 @@ func (r *MultiInterpreterRuntime) Dereference(obj py.PyObjectPtr, ticket *Interp
 		return -1, errors.New("reference count for object went negative")
 	}
 	interpreter.references[obj] = cnt - 1
+
+	runtime.LockOSThread()
 	py.Py_DecRef(obj)
+	runtime.UnlockOSThread()
+
 	return interpreter.references[obj], nil
 }

@@ -1,7 +1,7 @@
 input:
   python:
     name: widget
-    pickle: true
+    serializer: pickle
     script: |
       from examples.input.widget import Widget
       widget = Widget(123)
@@ -9,6 +9,7 @@ input:
 pipeline:
   processors:
     - python:
+        mode: isolated
         script: |
           import pickle
           widget = pickle.loads(content())
