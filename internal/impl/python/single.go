@@ -123,8 +123,8 @@ func (r *SingleInterpreterRuntime) Apply(ticket *InterpreterTicket, _ context.Co
 	return err
 }
 
-func (r *SingleInterpreterRuntime) Map(ctx context.Context, f func(token *InterpreterTicket) error) error {
-	token, err := r.Acquire(ctx)
+func (r *SingleInterpreterRuntime) Map(ctx context.Context, f func(ticket *InterpreterTicket) error) error {
+	ticket, err := r.Acquire(ctx)
 	if err != nil {
 		return nil
 	}
@@ -133,12 +133,12 @@ func (r *SingleInterpreterRuntime) Map(ctx context.Context, f func(token *Interp
 	runtime.LockOSThread()
 	py.PyEval_RestoreThread(r.thread)
 
-	err = f(token)
+	err = f(ticket)
 
 	// Release our thread state and unpin thread.
 	py.PyEval_SaveThread()
 	runtime.UnlockOSThread()
 
-	_ = r.Release(token)
+	_ = r.Release(ticket)
 	return err
 }

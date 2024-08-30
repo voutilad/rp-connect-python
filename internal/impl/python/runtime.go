@@ -3,9 +3,11 @@ package python
 import (
 	"context"
 	"errors"
-	py "github.com/voutilad/gogopython"
+	"fmt"
 	"runtime"
 	"strings"
+
+	py "github.com/voutilad/gogopython"
 )
 
 // globalMtx guards the global Python program logic as only a single Python
@@ -36,11 +38,17 @@ type config struct {
 	paths []string
 }
 
+type moduleRequest struct {
+	reply   chan interface{}
+	modules []string
+}
+
 var consumersCnt = 0                      // Number of current consumers. Protected by globalMtx.
 var chanToMain chan *config               // Channel for sending pointers to main go routine.
 var chanFromMain chan py.PyThreadStatePtr // Channel for receiving response from main go routine.
 
 var chanDropRefs chan []py.PyObjectPtr
+var chanLoadModules chan *moduleRequest
 
 func init() {
 	globalMtx = NewContextAwareMutex()
@@ -48,6 +56,7 @@ func init() {
 	chanFromMain = make(chan py.PyThreadStatePtr)
 
 	chanDropRefs = make(chan []py.PyObjectPtr)
+	chanLoadModules = make(chan *moduleRequest)
 }
 
 // An InterpreterTicket represents ownership of the interpreter of a particular
@@ -140,6 +149,9 @@ func loadPython(exe, home string, paths []string, ctx context.Context) (py.PyThr
 		case <-ctx.Done():
 			panic(ctx.Err())
 		}
+
+		// Wait for a reply. We hold the global mutex, so should be the only
+		// consumer from this channel.
 		select {
 		case pythonMain = <-chanFromMain:
 		// nop
@@ -187,6 +199,8 @@ func launchOnce() {
 	go func() {
 		runtime.LockOSThread()
 		defer runtime.UnlockOSThread()
+
+		var objsToDrop []py.PyObjectPtr
 
 		// Outer for-loop governs the high-level interpreter lifecycle.
 		for {
@@ -251,11 +265,31 @@ func launchOnce() {
 					keepRunning = false
 				case objs := <-chanDropRefs:
 					// Drop a reference to a global Python object.
+					_ = globalMtx.Lock()
 					py.PyEval_RestoreThread(ts)
 					for _, obj := range objs {
 						py.Py_DecRef(obj)
 					}
 					ts = py.PyEval_SaveThread()
+					globalMtx.Unlock()
+				case req := <-chanLoadModules:
+					// Load requested module(s) into the global interpreter.
+					_ = globalMtx.Lock()
+					py.PyEval_RestoreThread(ts)
+
+					for _, mod := range req.modules {
+						m := py.PyImport_ImportModule(mod)
+						if m == py.NullPyObjectPtr {
+							// XXX panic here or what?
+							panic(fmt.Sprintf("failed to import module %s", mod))
+						}
+						objsToDrop = append(objsToDrop, m)
+					}
+
+					ts = py.PyEval_SaveThread()
+					globalMtx.Unlock()
+
+					req.reply <- nil
 				}
 			}
 
@@ -269,16 +303,31 @@ func launchOnce() {
 }
 
 func DropGlobalReferences(objs []py.PyObjectPtr, ctx context.Context) error {
-	err := globalMtx.LockWithContext(ctx)
-	if err != nil {
-		return err
-	}
-	defer globalMtx.Unlock()
-
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
 	case chanDropRefs <- objs:
 		return nil
+	}
+}
+
+func LoadModules(modules []string, ctx context.Context) error {
+	request := moduleRequest{
+		reply:   make(chan interface{}),
+		modules: modules,
+	}
+
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case chanLoadModules <- &request:
+		// Wait for a reply. We hold the global mutex, so should be the only
+		// consumer from this channel.
+		select {
+		case <-request.reply:
+			return nil
+		case <-ctx.Done():
+			panic(ctx.Err())
+		}
 	}
 }
