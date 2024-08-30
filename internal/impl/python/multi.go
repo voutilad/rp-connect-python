@@ -27,10 +27,9 @@ type MultiInterpreterRuntime struct {
 
 // State related to a Python Sub-interpreter.
 type subInterpreter struct {
-	state      py.PyInterpreterStatePtr // Interpreter State.
-	thread     py.PyThreadStatePtr      // Original Python ThreadState.
-	id         int64                    // Unique identifier.
-	references map[py.PyObjectPtr]int
+	state  py.PyInterpreterStatePtr // Interpreter State.
+	thread py.PyThreadStatePtr      // Original Python ThreadState.
+	id     int64                    // Unique identifier.
 }
 
 func NewMultiInterpreterRuntime(exe string, cnt int, legacyMode bool, logger *service.Logger) (*MultiInterpreterRuntime, error) {
@@ -261,54 +260,8 @@ func (r *MultiInterpreterRuntime) initSubInterpreter() (*subInterpreter, error) 
 	py.PyEval_SaveThread()
 
 	return &subInterpreter{
-		state:      state,
-		thread:     ts,
-		id:         id,
-		references: make(map[py.PyObjectPtr]int),
+		state:  state,
+		thread: ts,
+		id:     id,
 	}, nil
-}
-
-func (r *MultiInterpreterRuntime) Reference(obj py.PyObjectPtr, ticket *InterpreterTicket) (int, error) {
-	// Double-check the token is valid.
-	if ticket.idx < 0 || ticket.idx > len(r.interpreters) {
-		return -1, errors.New("invalid token: bad index")
-	}
-
-	interpreter := r.interpreters[ticket.idx]
-	if interpreter.id != ticket.id {
-		return -1, errors.New("invalid token: bad interpreter id")
-	}
-
-	newCnt := interpreter.references[obj] + 1
-	interpreter.references[obj] = newCnt
-
-	runtime.LockOSThread()
-	py.Py_IncRef(obj)
-	runtime.UnlockOSThread()
-
-	return newCnt, nil
-}
-
-func (r *MultiInterpreterRuntime) Dereference(obj py.PyObjectPtr, ticket *InterpreterTicket) (int, error) {
-	// Double-check the token is valid.
-	if ticket.idx < 0 || ticket.idx > len(r.interpreters) {
-		return -1, errors.New("invalid token: bad index")
-	}
-
-	interpreter := r.interpreters[ticket.idx]
-	if interpreter.id != ticket.id {
-		return -1, errors.New("invalid token: bad interpreter id")
-	}
-
-	cnt := interpreter.references[obj]
-	if cnt == 0 {
-		return -1, errors.New("reference count for object went negative")
-	}
-	interpreter.references[obj] = cnt - 1
-
-	runtime.LockOSThread()
-	py.Py_DecRef(obj)
-	runtime.UnlockOSThread()
-
-	return interpreter.references[obj], nil
 }

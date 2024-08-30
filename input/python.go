@@ -304,11 +304,14 @@ func (p *pythonInput) ReadBatch(ctx context.Context) (service.MessageBatch, serv
 			var m *service.Message
 			switch p.serializerMode {
 			case python.None:
-				// We need to take a global reference to keep our object alive.
-				_, _ = p.runtime.Reference(next, ticket)
-				objs = append(objs, next)
 				m = service.NewMessage(nil)
 				m.SetStructured(next)
+
+				// Track our object and bump a reference as it's now part of
+				// the Global interpreter and must outlive this input loop
+				// until it is processed by an output.
+				objs = append(objs, next)
+				py.Py_IncRef(next)
 			case python.Bloblang:
 				m, err = toBloblang(next, p.serializer)
 			case python.Pickle:
@@ -342,34 +345,14 @@ func (p *pythonInput) ReadBatch(ctx context.Context) (service.MessageBatch, serv
 
 	// TODO: should we return service.ErrEndOfInput here, too, if we know
 	//       that we're finished?
-	return batch, newAckCallback(p.runtime, objs), nil
-}
-
-// newAckCallback captures the current python.Runtime and the list of Python
-// objects produced by a pythonInput. It's used for releasing a global
-// reference for each produced Python object once acknowledged by the output.
-func newAckCallback(runtime python.Runtime, objs []py.PyObjectPtr) service.AckFunc {
-	return func(ctx context.Context, err error) error {
-		// Our ack function callback needs to grab an interpreter, so get a
-		// ticket.
-		t, err := runtime.Acquire(ctx)
+	return batch, func(ctx context.Context, err error) error {
 		if err != nil {
-			// XXX panic for now...no way to recover.
-			panic(err)
+			// XXX ??? What happens here?
+			p.logger.Errorf("XXX?!?! %v\n", err)
+			return err
 		}
-		defer func() { _ = runtime.Release(t) }()
-
-		// Drop a reference for each globally tracked object. This might free
-		// them, but at this point the output should have processed them.
-		for _, obj := range objs {
-			_, err := runtime.Dereference(obj, t)
-			if err != nil {
-				// XXX panic for now...not sure how to recover.
-				panic(err)
-			}
-		}
-		return nil
-	}
+		return python.DropGlobalReferences(objs, ctx)
+	}, nil
 }
 
 func (p *pythonInput) Close(ctx context.Context) error {

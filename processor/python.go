@@ -419,10 +419,6 @@ func (p *PythonProcessor) ProcessBatch(ctx context.Context, batch service.Messag
 					continue
 				} else {
 					// XXX validate we're using global interpreter mode?
-					_, err = p.runtime.Reference(root, ticket)
-					if err != nil {
-						panic(err)
-					}
 					newMessage.SetStructured(root)
 				}
 			case python.Bloblang:

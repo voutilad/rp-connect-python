@@ -40,10 +40,14 @@ var consumersCnt = 0                      // Number of current consumers. Protec
 var chanToMain chan *config               // Channel for sending pointers to main go routine.
 var chanFromMain chan py.PyThreadStatePtr // Channel for receiving response from main go routine.
 
+var chanDropRefs chan []py.PyObjectPtr
+
 func init() {
 	globalMtx = NewContextAwareMutex()
 	chanToMain = make(chan *config)
 	chanFromMain = make(chan py.PyThreadStatePtr)
+
+	chanDropRefs = make(chan []py.PyObjectPtr)
 }
 
 // An InterpreterTicket represents ownership of the interpreter of a particular
@@ -84,14 +88,6 @@ type Runtime interface {
 	// In the case of multiple interpreters, an error aborts mapping over the
 	// remainder.
 	Map(ctx context.Context, f func(ticket *InterpreterTicket) error) error
-
-	// Reference track a given Python object associated with the interpreter
-	// identified by the given *InterpreterTicket.
-	Reference(obj py.PyObjectPtr, ticket *InterpreterTicket) (int, error)
-
-	// Dereference a given Python object associated with the interpreter
-	// identified by the given *InterpreterTicket.
-	Dereference(obj py.PyObjectPtr, ticket *InterpreterTicket) (int, error)
 }
 
 // Initialize the main Python interpreter or increment the global count if
@@ -192,6 +188,7 @@ func launchOnce() {
 		runtime.LockOSThread()
 		defer runtime.UnlockOSThread()
 
+		// Outer for-loop governs the high-level interpreter lifecycle.
 		for {
 			// Block until we are handed a config.
 			config := <-chanToMain
@@ -245,9 +242,22 @@ func launchOnce() {
 			}
 			chanFromMain <- ts
 
-			// Wait until all consumers disappear. We just try pulling a pointer
-			// out of the channel as a simple block.
-			<-chanToMain
+			// Inner for-loop responds to events from callers.
+			keepRunning := true
+			for keepRunning {
+				select {
+				case <-chanToMain:
+					// No consumers remain, so time to shut down the interpreter.
+					keepRunning = false
+				case objs := <-chanDropRefs:
+					// Drop a reference to a global Python object.
+					py.PyEval_RestoreThread(ts)
+					for _, obj := range objs {
+						py.Py_DecRef(obj)
+					}
+					ts = py.PyEval_SaveThread()
+				}
+			}
 
 			// Finalize Python. This has potential to deadlock or panic!
 			py.PyEval_RestoreThread(ts)
@@ -256,4 +266,19 @@ func launchOnce() {
 			}
 		}
 	}()
+}
+
+func DropGlobalReferences(objs []py.PyObjectPtr, ctx context.Context) error {
+	err := globalMtx.LockWithContext(ctx)
+	if err != nil {
+		return err
+	}
+	defer globalMtx.Unlock()
+
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case chanDropRefs <- objs:
+		return nil
+	}
 }
