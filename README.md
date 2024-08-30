@@ -437,8 +437,47 @@ output:
 > Note the use of `mode: global`!
 
 ### `pyarrow`
-Works fine in `global` mode. Might provide a better means of accessing large
-datasets lazily vs. Pandas.
+Works fine in `global` mode, but you need to prime the `input` by explicitly
+setting a `modules` config to load `pyarrow` prior to your script
+execution.
+
+An example follows using the `pyarrow.dataset` capabilities to read from GCS.
+
+> Note the use of `serializer: none` as it prevents data copying/duplication.
+
+```yaml
+input:
+  python:
+    name: batches
+    serializer: none
+    modules:
+      - pyarrow
+    script: |
+      import pyarrow as pa
+      from pyarrow import fs
+      import pyarrow.dataset as ds
+      
+      gcs = fs.GcsFileSystem()
+      dataset = ds.dataset("my-bucket/", format="parquet", filesystem=gcs)
+      
+      # need special handling to raw cython generators, so for now
+      # wrap with a pure python generator
+      def take_all():
+        for batch in dataset.to_batches():
+          yield batch
+      batches = take_all()
+
+pipeline:
+  processors:
+    - python:
+        script: |
+          # 'this' is now a PyArrow RecordBatch
+          root.nbytes = this.nbytes
+          root.num_rows = this.num_rows
+
+output:
+  stdout: {}
+```
 
 ### `pillow`
 Seems to work ok in `isolated_legacy` mode, but doesn't support
