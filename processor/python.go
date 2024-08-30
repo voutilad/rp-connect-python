@@ -348,6 +348,11 @@ func (p *PythonProcessor) ProcessBatch(ctx context.Context, batch service.Messag
 
 	err = p.runtime.Apply(ticket, ctx, func() error {
 		for _, m := range batch {
+			// Abort if we're cancelling execution.
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+
 			// Clear out any local state from previous messages.
 			py.PyDict_Clear(i.meta)
 			py.PyObject_CallNoArgs(i.rootClear)

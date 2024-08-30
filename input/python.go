@@ -253,6 +253,11 @@ func (p *pythonInput) ReadBatch(ctx context.Context) (service.MessageBatch, serv
 	var objs []py.PyObjectPtr
 
 	err = p.runtime.Apply(ticket, ctx, func() error {
+		// Abort if we're cancelling execution.
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+
 		next := py.NullPyObjectPtr
 
 		// TODO: add a flush timeout? Right now we fill a batch.
