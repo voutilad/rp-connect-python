@@ -25,7 +25,7 @@ func TestDifferentInterpreterModes(t *testing.T) {
 
 	for _, m := range []python.Mode{python.Isolated, python.IsolatedLegacy, python.Global} {
 		t.Run(string(m), func(t *testing.T) {
-			proc, err := NewPythonProcessor("python3", script, runtime.NumCPU(), m, python.Bloblang, nil)
+			proc, err := NewPythonProcessor("python3", script, nil, runtime.NumCPU(), m, python.Bloblang, nil)
 			if err != nil {
 				t.Fatal(err)
 			}
