@@ -132,15 +132,13 @@ type Runtime interface {
 // On failure, returns a null PyThreadStatePtr and an error.
 //
 // Must be called globalMtx and the OS thread locked.
-func loadPython(exe, home string, paths []string, ctx context.Context) (py.PyThreadStatePtr, error) {
+func loadPython(exe, home string, paths []string, ctx context.Context) {
 	globalMtx.AssertLocked()
 
 	// It's ok if we're starting another instance of the same executable, but
 	// we don't want to re-load the libraries as we'll crash.
 	if exe != pythonExe && pythonLoaded {
 		panic("python was already initialized with a different implementation")
-		//return py.NullThreadState,
-		//	errors.New("python was already initialized with a different implementation")
 	}
 
 	// Load our dynamic libraries. This should happen only once per process
@@ -149,7 +147,6 @@ func loadPython(exe, home string, paths []string, ctx context.Context) (py.PyThr
 		err := py.LoadLibrary(exe)
 		if err != nil {
 			panic(err)
-			// return py.NullThreadState, err
 		}
 
 		// From now on, we're considered "loaded."
@@ -185,8 +182,6 @@ func loadPython(exe, home string, paths []string, ctx context.Context) (py.PyThr
 			panic(ctx.Err())
 		}
 	}
-
-	return pythonMain, nil
 }
 
 // unloadPython tears down the global interpreter state.

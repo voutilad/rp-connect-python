@@ -53,11 +53,7 @@ func (r *MultiInterpreterRuntime) Start(ctx context.Context) error {
 	defer globalMtx.Unlock()
 
 	if !r.started {
-		ts, err := loadPython(r.exe, r.home, r.paths, ctx)
-		if err != nil || ts == py.NullThreadState {
-			r.logger.Errorf("Failed to start Python interpreter.")
-			return err
-		}
+		loadPython(r.exe, r.home, r.paths, ctx)
 		r.logger.Debug("Python interpreter started.")
 
 		// Start up sub-interpreters.

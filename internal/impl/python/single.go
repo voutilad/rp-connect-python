@@ -49,11 +49,7 @@ func (r *SingleInterpreterRuntime) Start(ctx context.Context) error {
 		return nil
 	}
 
-	_, err = loadPython(r.exe, r.home, r.paths, ctx)
-	if err != nil {
-		return err
-	}
-
+	loadPython(r.exe, r.home, r.paths, ctx)
 	r.ticket.cookie = uintptr(unsafe.Pointer(r))
 	r.started = true
 	r.logger.Debug("Python single runtime interpreter started.")
