@@ -16,7 +16,6 @@ pipeline:
     - python:
         mode: isolated
         script: |
-          print("HERE")
           # Return a lowercase version.
           msg = content().decode()
           root = msg.lower()
