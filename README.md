@@ -437,9 +437,7 @@ output:
 > Note the use of `mode: global`!
 
 ### `pyarrow`
-Works fine in `global` mode, but you need to prime the `input` by explicitly
-setting a `modules` config to load `pyarrow` prior to your script
-execution.
+Works fine in `global` mode.
 
 An example follows using the `pyarrow.dataset` capabilities to read from GCS.
 
@@ -450,8 +448,6 @@ input:
   python:
     name: batches
     serializer: none
-    modules:
-      - pyarrow
     script: |
       import pyarrow as pa
       from pyarrow import fs

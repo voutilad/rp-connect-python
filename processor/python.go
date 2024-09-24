@@ -88,8 +88,6 @@ func init() {
 			Description("Toggle different Python runtime modes.").
 			Examples(string(python.Global), string(python.Isolated), string(python.IsolatedLegacy)).
 			Default(string(python.Global))).
-		Field(service.NewStringListField("modules").
-			Description("A list of Python function modules to pre-import.")).
 		Field(service.NewStringField("serializer").
 			Description("Serialization mode to use on results.").
 			Examples(string(python.None), string(python.Pickle), string(python.Bloblang)).
@@ -115,13 +113,8 @@ func init() {
 			if err != nil {
 				return nil, err
 			}
-			modules, err := conf.FieldStringList("modules")
-			if err != nil {
-				return nil, err
-			}
 
-			return NewPythonProcessor(exe, script, modules,
-				runtime.NumCPU(),
+			return NewPythonProcessor(exe, script, runtime.NumCPU(),
 				python.StringAsMode(modeString),
 				python.StringAsSerializerMode(serializer),
 				mgr.Logger())
@@ -137,7 +130,7 @@ func init() {
 //
 // This will create and initialize a new sub-interpreter from the main Python
 // Go routine and precompile some Python code objects.
-func NewPythonProcessor(exe, script string, modules []string, cnt int, mode python.Mode, serializer python.SerializerMode,
+func NewPythonProcessor(exe, script string, cnt int, mode python.Mode, serializer python.SerializerMode,
 	logger *service.Logger) (service.BatchProcessor, error) {
 
 	var err error
@@ -173,13 +166,6 @@ func NewPythonProcessor(exe, script string, modules []string, cnt int, mode pyth
 	err = processor.runtime.Start(ctx)
 	if err != nil {
 		return nil, err
-	}
-
-	if len(modules) > 0 {
-		err = python.LoadModules(modules, ctx)
-		if err != nil {
-			return nil, err
-		}
 	}
 
 	// Initialize our sub-interpreter state.

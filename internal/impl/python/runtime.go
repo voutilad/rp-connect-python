@@ -3,7 +3,6 @@ package python
 import (
 	"context"
 	"errors"
-	"fmt"
 	"runtime"
 	"strings"
 
@@ -38,11 +37,6 @@ type config struct {
 	paths []string
 }
 
-type moduleRequest struct {
-	reply   chan interface{}
-	modules []string
-}
-
 type fnRequest struct {
 	reply chan error
 	fn    func() error
@@ -68,7 +62,6 @@ var chanToMain chan *config               // Channel for sending pointers to mai
 var chanFromMain chan py.PyThreadStatePtr // Channel for receiving response from main go routine.
 
 var chanDropRefs chan []py.PyObjectPtr
-var chanLoadModules chan *moduleRequest
 var chanExecFuncs chan *fnRequest
 var chanSpawnSub chan *subRequest
 var chanStopSub chan *subStopRequest
@@ -79,7 +72,6 @@ func init() {
 	chanFromMain = make(chan py.PyThreadStatePtr)
 
 	chanDropRefs = make(chan []py.PyObjectPtr)
-	chanLoadModules = make(chan *moduleRequest)
 	chanExecFuncs = make(chan *fnRequest)
 	chanSpawnSub = make(chan *subRequest)
 	chanStopSub = make(chan *subStopRequest)
@@ -221,8 +213,6 @@ func launchOnce() {
 		runtime.LockOSThread()
 		defer runtime.UnlockOSThread()
 
-		var objsToDrop []py.PyObjectPtr
-
 		// Outer for-loop governs the high-level interpreter lifecycle.
 		for {
 			// Block until we are handed a config.
@@ -293,21 +283,6 @@ func launchOnce() {
 					}
 					py.PyEval_SaveThread()
 
-				case req := <-chanLoadModules:
-					// Load requested module(s) into the global interpreter.
-					py.PyEval_RestoreThread(ts)
-					for _, mod := range req.modules {
-						m := py.PyImport_ImportModule(mod)
-						if m == py.NullPyObjectPtr {
-							// XXX panic here or what?
-							panic(fmt.Sprintf("failed to import module %s", mod))
-						}
-						objsToDrop = append(objsToDrop, m)
-					}
-					py.PyEval_SaveThread()
-
-					req.reply <- nil
-
 				case req := <-chanExecFuncs:
 					// XXX Hack to execute functions on the "main" go routine.
 					//     Wastes cycles dancing with locks and thread states.
@@ -353,27 +328,6 @@ func DropGlobalReferences(objs []py.PyObjectPtr, ctx context.Context) error {
 		return ctx.Err()
 	case chanDropRefs <- objs:
 		return nil
-	}
-}
-
-func LoadModules(modules []string, ctx context.Context) error {
-	request := moduleRequest{
-		reply:   make(chan interface{}),
-		modules: modules,
-	}
-
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case chanLoadModules <- &request:
-		// Wait for a reply. We hold the global mutex, so should be the only
-		// consumer from this channel.
-		select {
-		case <-request.reply:
-			return nil
-		case <-ctx.Done():
-			panic(ctx.Err())
-		}
 	}
 }
 
