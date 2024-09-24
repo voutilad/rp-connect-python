@@ -15,7 +15,6 @@ type SingleInterpreterRuntime struct {
 	exe     string
 	home    string
 	paths   []string
-	thread  py.PyThreadStatePtr
 	ticket  InterpreterTicket // SingleInterpreterRuntime uses a single ticket.
 	started bool              // protected by globalMtx in runtime.go
 	logger  *service.Logger
@@ -50,12 +49,11 @@ func (r *SingleInterpreterRuntime) Start(ctx context.Context) error {
 		return nil
 	}
 
-	ts, err := loadPython(r.exe, r.home, r.paths, ctx)
+	_, err = loadPython(r.exe, r.home, r.paths, ctx)
 	if err != nil {
 		return err
 	}
 
-	r.thread = ts
 	r.ticket.cookie = uintptr(unsafe.Pointer(r))
 	r.started = true
 	r.logger.Debug("Python single runtime interpreter started.")
@@ -71,7 +69,6 @@ func (r *SingleInterpreterRuntime) Stop(ctx context.Context) error {
 	defer globalMtx.Unlock()
 
 	err = unloadPython(ctx)
-	r.thread = py.NullThreadState
 	r.ticket.cookie = 0 // NULL
 	r.started = false
 
@@ -85,13 +82,6 @@ func (r *SingleInterpreterRuntime) Stop(ctx context.Context) error {
 }
 
 func (r *SingleInterpreterRuntime) Acquire(ctx context.Context) (*InterpreterTicket, error) {
-	// Since the SingleInterpreterRuntime uses the main interpreter, we need
-	// take the global lock.
-	err := globalMtx.LockWithContext(ctx)
-	if err != nil {
-		return nil, err
-	}
-
 	return &r.ticket, nil
 }
 
@@ -100,7 +90,6 @@ func (r *SingleInterpreterRuntime) Release(ticket *InterpreterTicket) error {
 		return errors.New("invalid interpreter ticket")
 	}
 
-	globalMtx.Unlock()
 	return nil
 }
 
@@ -119,7 +108,6 @@ func (r *SingleInterpreterRuntime) Map(ctx context.Context, f func(ticket *Inter
 	}
 
 	err = Evaluate(func() error { return f(ticket) }, ctx)
-
 	_ = r.Release(ticket)
 	return err
 }
