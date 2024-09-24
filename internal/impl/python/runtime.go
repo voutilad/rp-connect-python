@@ -43,12 +43,18 @@ type moduleRequest struct {
 	modules []string
 }
 
+type fnRequest struct {
+	reply chan error
+	fn    func() error
+}
+
 var consumersCnt = 0                      // Number of current consumers. Protected by globalMtx.
 var chanToMain chan *config               // Channel for sending pointers to main go routine.
 var chanFromMain chan py.PyThreadStatePtr // Channel for receiving response from main go routine.
 
 var chanDropRefs chan []py.PyObjectPtr
 var chanLoadModules chan *moduleRequest
+var chanExecFuncs chan *fnRequest
 
 func init() {
 	globalMtx = NewContextAwareMutex()
@@ -57,6 +63,7 @@ func init() {
 
 	chanDropRefs = make(chan []py.PyObjectPtr)
 	chanLoadModules = make(chan *moduleRequest)
+	chanExecFuncs = make(chan *fnRequest)
 }
 
 // An InterpreterTicket represents ownership of the interpreter of a particular
@@ -290,6 +297,13 @@ func launchOnce() {
 					globalMtx.Unlock()
 
 					req.reply <- nil
+				case req := <-chanExecFuncs:
+					// XXX Hack to execute functions on the "main" go routine.
+					//     Wastes cycles dancing with locks and thread states.
+					py.PyEval_RestoreThread(ts)
+					err := req.fn()
+					ts = py.PyEval_SaveThread()
+					req.reply <- err
 				}
 			}
 
@@ -326,6 +340,29 @@ func LoadModules(modules []string, ctx context.Context) error {
 		select {
 		case <-request.reply:
 			return nil
+		case <-ctx.Done():
+			panic(ctx.Err())
+		}
+	}
+}
+
+func Evaluate(fn func() error, ctx context.Context) error {
+	// XXX This is all a hack currently and needs optimization.
+	globalMtx.AssertLocked()
+
+	request := fnRequest{
+		reply: make(chan error),
+		fn:    fn,
+	}
+
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case chanExecFuncs <- &request:
+		// Wait for a reply.
+		select {
+		case err := <-request.reply:
+			return err
 		case <-ctx.Done():
 			panic(ctx.Err())
 		}

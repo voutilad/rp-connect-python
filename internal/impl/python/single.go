@@ -3,7 +3,6 @@ package python
 import (
 	"context"
 	"errors"
-	"runtime"
 	"unsafe"
 
 	"github.com/redpanda-data/benthos/v4/public/service"
@@ -105,22 +104,12 @@ func (r *SingleInterpreterRuntime) Release(ticket *InterpreterTicket) error {
 	return nil
 }
 
-func (r *SingleInterpreterRuntime) Apply(ticket *InterpreterTicket, _ context.Context, f func() error) error {
+func (r *SingleInterpreterRuntime) Apply(ticket *InterpreterTicket, ctx context.Context, f func() error) error {
 	if ticket.cookie != r.ticket.cookie {
 		return errors.New("invalid interpreter ticket")
 	}
 
-	// Pin our go routine & enter the context of the interpreter thread state.
-	runtime.LockOSThread()
-	py.PyEval_RestoreThread(r.thread)
-
-	err := f()
-
-	// Release our thread state and unpin thread.
-	py.PyEval_SaveThread()
-	runtime.UnlockOSThread()
-
-	return err
+	return Evaluate(f, ctx)
 }
 
 func (r *SingleInterpreterRuntime) Map(ctx context.Context, f func(ticket *InterpreterTicket) error) error {
@@ -129,15 +118,7 @@ func (r *SingleInterpreterRuntime) Map(ctx context.Context, f func(ticket *Inter
 		return nil
 	}
 
-	// Pin our go routine & enter the context of the interpreter thread state.
-	runtime.LockOSThread()
-	py.PyEval_RestoreThread(r.thread)
-
-	err = f(ticket)
-
-	// Release our thread state and unpin thread.
-	py.PyEval_SaveThread()
-	runtime.UnlockOSThread()
+	err = Evaluate(func() error { return f(ticket) }, ctx)
 
 	_ = r.Release(ticket)
 	return err
