@@ -3,7 +3,6 @@ package python
 import (
 	"context"
 	"errors"
-	"fmt"
 	"runtime"
 	"strings"
 
@@ -33,14 +32,36 @@ var pythonExe = ""
 // Protected by globalMtx.
 var pythonMain py.PyThreadStatePtr
 
+// subInterpreter state to allow multi-interpreter runtimes.
+type subInterpreter struct {
+	state  py.PyInterpreterStatePtr // Interpreter State.
+	thread py.PyThreadStatePtr      // Original Python ThreadState.
+	id     int64                    // Unique identifier.
+}
+
 type config struct {
 	home  string
 	paths []string
 }
 
-type moduleRequest struct {
-	reply   chan interface{}
-	modules []string
+type fnRequest struct {
+	reply chan error
+	fn    func() error
+}
+
+type subRequest struct {
+	legacyMode bool
+	reply      chan *subReply
+}
+
+type subReply struct {
+	err            error
+	subInterpreter *subInterpreter
+}
+
+type subStopRequest struct {
+	reply          chan error
+	subInterpreter *subInterpreter
 }
 
 var consumersCnt = 0                      // Number of current consumers. Protected by globalMtx.
@@ -48,7 +69,9 @@ var chanToMain chan *config               // Channel for sending pointers to mai
 var chanFromMain chan py.PyThreadStatePtr // Channel for receiving response from main go routine.
 
 var chanDropRefs chan []py.PyObjectPtr
-var chanLoadModules chan *moduleRequest
+var chanExecFuncs chan *fnRequest
+var chanSpawnSub chan *subRequest
+var chanStopSub chan *subStopRequest
 
 func init() {
 	globalMtx = NewContextAwareMutex()
@@ -56,7 +79,9 @@ func init() {
 	chanFromMain = make(chan py.PyThreadStatePtr)
 
 	chanDropRefs = make(chan []py.PyObjectPtr)
-	chanLoadModules = make(chan *moduleRequest)
+	chanExecFuncs = make(chan *fnRequest)
+	chanSpawnSub = make(chan *subRequest)
+	chanStopSub = make(chan *subStopRequest)
 }
 
 // An InterpreterTicket represents ownership of the interpreter of a particular
@@ -106,15 +131,13 @@ type Runtime interface {
 // On failure, returns a null PyThreadStatePtr and an error.
 //
 // Must be called globalMtx and the OS thread locked.
-func loadPython(exe, home string, paths []string, ctx context.Context) (py.PyThreadStatePtr, error) {
+func loadPython(exe, home string, paths []string, ctx context.Context) {
 	globalMtx.AssertLocked()
 
 	// It's ok if we're starting another instance of the same executable, but
 	// we don't want to re-load the libraries as we'll crash.
 	if exe != pythonExe && pythonLoaded {
 		panic("python was already initialized with a different implementation")
-		//return py.NullThreadState,
-		//	errors.New("python was already initialized with a different implementation")
 	}
 
 	// Load our dynamic libraries. This should happen only once per process
@@ -123,7 +146,6 @@ func loadPython(exe, home string, paths []string, ctx context.Context) (py.PyThr
 		err := py.LoadLibrary(exe)
 		if err != nil {
 			panic(err)
-			// return py.NullThreadState, err
 		}
 
 		// From now on, we're considered "loaded."
@@ -159,13 +181,11 @@ func loadPython(exe, home string, paths []string, ctx context.Context) (py.PyThr
 			panic(ctx.Err())
 		}
 	}
-
-	return pythonMain, nil
 }
 
 // unloadPython tears down the global interpreter state.
 //
-// Must be called with the go routine thread pinned and global mutex locked.
+// Must be called with the global mutex locked.
 func unloadPython(_ context.Context) error {
 	globalMtx.AssertLocked()
 
@@ -199,8 +219,6 @@ func launchOnce() {
 	go func() {
 		runtime.LockOSThread()
 		defer runtime.UnlockOSThread()
-
-		var objsToDrop []py.PyObjectPtr
 
 		// Outer for-loop governs the high-level interpreter lifecycle.
 		for {
@@ -263,32 +281,41 @@ func launchOnce() {
 				case <-chanToMain:
 					// No consumers remain, so time to shut down the interpreter.
 					keepRunning = false
+
 				case objs := <-chanDropRefs:
 					// Drop a reference to a global Python object.
-					_ = globalMtx.Lock()
 					py.PyEval_RestoreThread(ts)
 					for _, obj := range objs {
 						py.Py_DecRef(obj)
 					}
-					ts = py.PyEval_SaveThread()
-					globalMtx.Unlock()
-				case req := <-chanLoadModules:
-					// Load requested module(s) into the global interpreter.
-					_ = globalMtx.Lock()
-					py.PyEval_RestoreThread(ts)
+					py.PyEval_SaveThread()
 
-					for _, mod := range req.modules {
-						m := py.PyImport_ImportModule(mod)
-						if m == py.NullPyObjectPtr {
-							// XXX panic here or what?
-							panic(fmt.Sprintf("failed to import module %s", mod))
-						}
-						objsToDrop = append(objsToDrop, m)
+				case req := <-chanExecFuncs:
+					// XXX Hack to execute functions on the "main" go routine.
+					//     Wastes cycles dancing with locks and thread states.
+					py.PyEval_RestoreThread(ts)
+					result := req.fn()
+					py.PyEval_SaveThread()
+					req.reply <- result
+
+				case req := <-chanSpawnSub:
+					py.PyEval_RestoreThread(ts)
+					sub, err := initSubInterpreter(req.legacyMode)
+					// XXX No need to save here.
+					req.reply <- &subReply{
+						err:            err,
+						subInterpreter: sub,
 					}
 
-					ts = py.PyEval_SaveThread()
-					globalMtx.Unlock()
+				case req := <-chanStopSub:
+					// Restore the sub-interpreter thread state.
+					sub := req.subInterpreter
+					py.PyEval_RestoreThread(sub.thread)
+					py.PyThreadState_Clear(sub.thread)
 
+					// Clean up the ThreadState. Clear *must* be called before Delete.
+					py.PyInterpreterState_Clear(sub.state)
+					py.PyInterpreterState_Delete(sub.state)
 					req.reply <- nil
 				}
 			}
@@ -302,6 +329,7 @@ func launchOnce() {
 	}()
 }
 
+// DropGlobalReferences to a list of PyObjectPtr.
 func DropGlobalReferences(objs []py.PyObjectPtr, ctx context.Context) error {
 	select {
 	case <-ctx.Done():
@@ -311,23 +339,110 @@ func DropGlobalReferences(objs []py.PyObjectPtr, ctx context.Context) error {
 	}
 }
 
-func LoadModules(modules []string, ctx context.Context) error {
-	request := moduleRequest{
-		reply:   make(chan interface{}),
-		modules: modules,
+// Evaluate a given function fn in the context of the main interpreter.
+// A response is provided via the channel c.
+//
+// XXX This may look a little odd, both returning an error and using a
+// channel, but it's to avoid having to allocate a channel for each call
+// as this function will be called frequently.
+func Evaluate(fn func() error, c chan error, ctx context.Context) error {
+	request := fnRequest{
+		reply: c,
+		fn:    fn,
 	}
 
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
-	case chanLoadModules <- &request:
-		// Wait for a reply. We hold the global mutex, so should be the only
-		// consumer from this channel.
+	case chanExecFuncs <- &request:
+		// Wait for a reply.
 		select {
-		case <-request.reply:
-			return nil
+		case err := <-c:
+			return err
 		case <-ctx.Done():
 			panic(ctx.Err())
 		}
 	}
+}
+
+// Spawn a new sub-interpreter.
+func Spawn(legacyMode bool, ctx context.Context) (*subInterpreter, error) {
+	request := subRequest{
+		reply:      make(chan *subReply),
+		legacyMode: legacyMode,
+	}
+
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case chanSpawnSub <- &request:
+		select {
+		case result := <-request.reply:
+			return result.subInterpreter, result.err
+		case <-ctx.Done():
+			panic(ctx.Err())
+		}
+	}
+}
+
+// StopSub will attempt to shut down a sub-interpreter.
+func StopSub(subInterpreter *subInterpreter, ctx context.Context) error {
+	request := subStopRequest{
+		subInterpreter: subInterpreter,
+		reply:          make(chan error),
+	}
+
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case chanStopSub <- &request:
+		select {
+		case err := <-request.reply:
+			return err
+		case <-ctx.Done():
+			panic(ctx.Err())
+		}
+	}
+}
+
+// Initialize a Sub-interpreter.
+//
+// Caller must have the main interpreter state loaded and Go routine pinned.
+// This must be called from the context of the "main" interpreter.
+func initSubInterpreter(legacyMode bool) (*subInterpreter, error) {
+	// Some of these args are required if we want to use Numpy, etc.
+	var ts py.PyThreadStatePtr
+	interpreterConfig := py.PyInterpreterConfig{}
+
+	if !legacyMode {
+		interpreterConfig.Gil = py.OwnGil
+		interpreterConfig.CheckMultiInterpExtensions = 1
+		interpreterConfig.UseMainObMalloc = 0
+		interpreterConfig.AllowThreads = 1       // Allow using threading library.
+		interpreterConfig.AllowDaemonThreads = 0 // Don't allow daemon threads for now.
+	} else {
+		interpreterConfig.Gil = py.SharedGil
+		interpreterConfig.CheckMultiInterpExtensions = 0 // Numpy uses "legacy" extensions.
+		interpreterConfig.UseMainObMalloc = 1            // This must be 1 if using "legacy" extensions.
+		interpreterConfig.AllowThreads = 1               // Allow using threading library.
+		interpreterConfig.AllowDaemonThreads = 0         // Don't allow daemon threads for now.
+	}
+
+	// Cross your fingers. This has potential for a fatal (panic) exit.
+	status := py.Py_NewInterpreterFromConfig(&ts, &interpreterConfig)
+	if status.Type != 0 {
+		msg, _ := py.WCharToString(status.ErrMsg)
+		return nil, errors.New(msg)
+	}
+
+	// Collect our information and drop the GIL.
+	state := py.PyInterpreterState_Get()
+	id := py.PyInterpreterState_GetID(state)
+	ts = py.PyEval_SaveThread()
+
+	return &subInterpreter{
+		state:  state,
+		thread: ts,
+		id:     id,
+	}, nil
 }

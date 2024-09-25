@@ -18,8 +18,6 @@ var configSpec = service.NewConfigSpec().
 		Description("Toggle different Python runtime modes.").
 		Examples(string(python.Global), string(python.Isolated), string(python.IsolatedLegacy)).
 		Default(string(python.Global))).
-	Field(service.NewStringListField("modules").
-		Description("A list of Python function modules to pre-import.")).
 	Field(service.NewStringField("serializer").
 		Description("Serialization mode to use on results.").
 		Examples(string(python.None), string(python.Pickle), string(python.Bloblang)).
@@ -48,11 +46,8 @@ func init() {
 			if err != nil {
 				return nil, policy, 0, err
 			}
-			modules, err := conf.FieldStringList("modules")
-			if err != nil {
-				return nil, policy, 0, err
-			}
-			p, err := processor.NewPythonProcessor(exe, script, modules, 1, python.StringAsMode(modeString), python.Bloblang, mgr.Logger())
+
+			p, err := processor.NewPythonProcessor(exe, script, 1, python.StringAsMode(modeString), python.Bloblang, mgr.Logger())
 			if err != nil {
 				return nil, policy, 0, err
 			}

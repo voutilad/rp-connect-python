@@ -1,6 +1,8 @@
 package python
 
-import "strings"
+import (
+	"strings"
+)
 
 type Mode string
 

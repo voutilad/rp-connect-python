@@ -11,10 +11,9 @@ import (
 
 // MultiInterpreterRuntime creates and manages multiple Python sub-interpreters.
 type MultiInterpreterRuntime struct {
-	exe    string              // Python exe (binary).
-	home   string              // Python home.
-	paths  []string            // Python package paths.
-	thread py.PyThreadStatePtr // Main interpreter thread state.
+	exe   string   // Python exe (binary).
+	home  string   // Python home.
+	paths []string // Python package paths.
 
 	interpreters []*subInterpreter       // Sub-interpreters.
 	tickets      chan *InterpreterTicket // Tickets for sub-interpreters.
@@ -23,13 +22,6 @@ type MultiInterpreterRuntime struct {
 	started    bool
 	legacyMode bool            // Running in legacy mode?
 	logger     *service.Logger // Redpanda Connect logger service.
-}
-
-// State related to a Python Sub-interpreter.
-type subInterpreter struct {
-	state  py.PyInterpreterStatePtr // Interpreter State.
-	thread py.PyThreadStatePtr      // Original Python ThreadState.
-	id     int64                    // Unique identifier.
 }
 
 func NewMultiInterpreterRuntime(exe string, cnt int, legacyMode bool, logger *service.Logger) (*MultiInterpreterRuntime, error) {
@@ -60,34 +52,31 @@ func (r *MultiInterpreterRuntime) Start(ctx context.Context) error {
 	}
 	defer globalMtx.Unlock()
 
-	if !r.started {
-		r.thread, err = loadPython(r.exe, r.home, r.paths, ctx)
-		if err != nil || r.thread == py.NullThreadState {
-			r.logger.Errorf("Failed to start Python interpreter.")
+	if r.started {
+		// Already running.
+		return nil
+	}
+
+	loadPython(r.exe, r.home, r.paths, ctx)
+	r.logger.Debug("Python interpreter started.")
+
+	// Start up sub-interpreters.
+	for idx := range len(r.interpreters) {
+		sub, err := Spawn(r.legacyMode, ctx)
+		if err != nil {
+			r.logger.Error("Failed to create new sub-interpreter.")
 			return err
 		}
-		r.logger.Debug("Python interpreter started.")
 
-		runtime.LockOSThread()
-		// Start up sub-interpreters.
-		for idx := range len(r.interpreters) {
-			py.PyEval_RestoreThread(r.thread)
-			sub, err := r.initSubInterpreter()
-			if err != nil {
-				r.logger.Error("Failed to create new sub-interpreter.")
-				return err
-			}
-
-			// Populate our ticket booth and interpreter list.
-			r.interpreters[idx] = sub
-			r.tickets <- &InterpreterTicket{idx: idx, id: sub.id}
-			r.logger.Tracef("Initialized sub-interpreter %d.\n", sub.id)
-		}
-		runtime.UnlockOSThread()
-
-		r.started = true
-		r.logger.Debugf("Started %d sub-interpreters.", len(r.tickets))
+		// Populate our ticket booth and interpreter list.
+		r.interpreters[idx] = sub
+		r.tickets <- &InterpreterTicket{idx: idx, id: sub.id}
+		r.logger.Tracef("Initialized sub-interpreter %d.\n", sub.id)
 	}
+
+	r.started = true
+	r.logger.Debugf("Started %d sub-interpreters.", len(r.tickets))
+
 	return nil
 }
 
@@ -103,9 +92,6 @@ func (r *MultiInterpreterRuntime) Stop(ctx context.Context) error {
 		return errors.New("not started")
 	}
 
-	runtime.LockOSThread()
-	defer runtime.UnlockOSThread()
-
 	// Collect all the tickets before stopping the sub-interpreters.
 	tickets := make([]*InterpreterTicket, len(r.tickets))
 	for idx := range tickets {
@@ -119,17 +105,16 @@ func (r *MultiInterpreterRuntime) Stop(ctx context.Context) error {
 	// We have all the tickets. Time to kill the sub-interpreters.
 	for _, ticket := range tickets {
 		sub := r.interpreters[ticket.idx]
-		// Restore the sub-interpreter thread state.
-		py.PyEval_RestoreThread(sub.thread)
-		py.PyThreadState_Clear(sub.thread)
-
-		// Clean up the ThreadState. Clear *must* be called before Delete.
-		py.PyInterpreterState_Clear(sub.state)
-		py.PyInterpreterState_Delete(sub.state)
+		err = StopSub(sub, ctx)
+		if err != nil {
+			return err
+		}
 		r.logger.Tracef("Stopped sub-interpreter %d.\n", sub.id)
 	}
 
 	// Tear down the runtime.
+	// runtime.LockOSThread()
+	// defer runtime.UnlockOSThread()
 	err = unloadPython(ctx)
 	if err != nil {
 		return err
@@ -152,7 +137,7 @@ func (r *MultiInterpreterRuntime) Acquire(ctx context.Context) (*InterpreterTick
 
 func (r *MultiInterpreterRuntime) Release(ticket *InterpreterTicket) error {
 	// Double-check the token is valid.
-	if ticket.idx < 0 || ticket.idx > len(r.interpreters) {
+	if ticket.idx < 0 || ticket.idx > len(r.tickets) {
 		return errors.New("invalid ticket: bad index")
 	}
 
@@ -223,45 +208,4 @@ func (r *MultiInterpreterRuntime) Map(ctx context.Context, f func(t *Interpreter
 	}
 
 	return nil
-}
-
-// Initialize a Sub-interpreter.
-//
-// Caller must have the main interpreter state loaded and Go routine pinned.
-func (r *MultiInterpreterRuntime) initSubInterpreter() (*subInterpreter, error) {
-	// Some of these args are required if we want to use Numpy, etc.
-	var ts py.PyThreadStatePtr
-	interpreterConfig := py.PyInterpreterConfig{}
-
-	if !r.legacyMode {
-		interpreterConfig.Gil = py.OwnGil
-		interpreterConfig.CheckMultiInterpExtensions = 1
-		interpreterConfig.UseMainObMalloc = 0
-		interpreterConfig.AllowThreads = 1       // Allow using threading library.
-		interpreterConfig.AllowDaemonThreads = 0 // Don't allow daemon threads for now.
-	} else {
-		interpreterConfig.Gil = py.SharedGil
-		interpreterConfig.CheckMultiInterpExtensions = 0 // Numpy uses "legacy" extensions.
-		interpreterConfig.UseMainObMalloc = 1            // This must be 1 if using "legacy" extensions.
-		interpreterConfig.AllowThreads = 1               // Allow using threading library.
-		interpreterConfig.AllowDaemonThreads = 0         // Don't allow daemon threads for now.
-	}
-
-	// Cross your fingers. This has potential for a fatal (panic) exit.
-	status := py.Py_NewInterpreterFromConfig(&ts, &interpreterConfig)
-	if status.Type != 0 {
-		msg, _ := py.WCharToString(status.ErrMsg)
-		return nil, errors.New(msg)
-	}
-
-	// Collect our information and drop the GIL.
-	state := py.PyInterpreterState_Get()
-	id := py.PyInterpreterState_GetID(state)
-	py.PyEval_SaveThread()
-
-	return &subInterpreter{
-		state:  state,
-		thread: ts,
-		id:     id,
-	}, nil
 }

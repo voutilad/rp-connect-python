@@ -3,9 +3,6 @@ package python
 import (
 	"context"
 	"errors"
-	"runtime"
-	"unsafe"
-
 	"github.com/redpanda-data/benthos/v4/public/service"
 	py "github.com/voutilad/gogopython"
 )
@@ -13,29 +10,30 @@ import (
 // SingleInterpreterRuntime provides an implementation for using main
 // Python interpreter.
 type SingleInterpreterRuntime struct {
-	exe     string
-	home    string
-	paths   []string
-	thread  py.PyThreadStatePtr
-	ticket  InterpreterTicket // SingleInterpreterRuntime uses a single ticket.
-	started bool              // protected by globalMtx in runtime.go
+	exe   string
+	home  string
+	paths []string
+
+	replyChans []chan error
+	tickets    chan *InterpreterTicket // SingleInterpreterRuntime uses a single ticket.
+
+	started bool // protected by globalMtx in runtime.go
 	logger  *service.Logger
 }
 
-func NewSingleInterpreterRuntime(exe string, logger *service.Logger) (*SingleInterpreterRuntime, error) {
+func NewSingleInterpreterRuntime(exe string, cnt int, logger *service.Logger) (*SingleInterpreterRuntime, error) {
 	home, paths, err := py.FindPythonHomeAndPaths(exe)
 	if err != nil {
 		return nil, err
 	}
 
 	return &SingleInterpreterRuntime{
-		exe:    exe,
-		home:   home,
-		paths:  paths,
-		logger: logger,
-		ticket: InterpreterTicket{
-			id: -1,
-		},
+		exe:        exe,
+		home:       home,
+		paths:      paths,
+		logger:     logger,
+		tickets:    make(chan *InterpreterTicket, cnt),
+		replyChans: make([]chan error, cnt),
 	}, nil
 }
 
@@ -51,13 +49,14 @@ func (r *SingleInterpreterRuntime) Start(ctx context.Context) error {
 		return nil
 	}
 
-	ts, err := loadPython(r.exe, r.home, r.paths, ctx)
-	if err != nil {
-		return err
+	loadPython(r.exe, r.home, r.paths, ctx)
+	r.logger.Debug("Python interpreter started.")
+
+	for idx := range len(r.replyChans) {
+		r.replyChans[idx] = make(chan error)
+		r.tickets <- &InterpreterTicket{idx: idx, id: -1}
 	}
 
-	r.thread = ts
-	r.ticket.cookie = uintptr(unsafe.Pointer(r))
 	r.started = true
 	r.logger.Debug("Python single runtime interpreter started.")
 
@@ -71,9 +70,24 @@ func (r *SingleInterpreterRuntime) Stop(ctx context.Context) error {
 	}
 	defer globalMtx.Unlock()
 
+	if !r.started {
+		return errors.New("not started")
+	}
+
+	// Collect all the tickets so nobody else can get them.
+	tickets := make([]*InterpreterTicket, len(r.tickets))
+	for idx := range tickets {
+		ticket, err := r.Acquire(ctx)
+		if err != nil {
+			panic("cannot acquire ticket while stopping")
+		}
+		tickets[idx] = ticket
+	}
+
 	err = unloadPython(ctx)
-	r.thread = py.NullThreadState
-	r.ticket.cookie = 0 // NULL
+	if err != nil {
+		return err
+	}
 	r.started = false
 
 	if err == nil {
@@ -86,41 +100,35 @@ func (r *SingleInterpreterRuntime) Stop(ctx context.Context) error {
 }
 
 func (r *SingleInterpreterRuntime) Acquire(ctx context.Context) (*InterpreterTicket, error) {
-	// Since the SingleInterpreterRuntime uses the main interpreter, we need
-	// take the global lock.
-	err := globalMtx.LockWithContext(ctx)
-	if err != nil {
-		return nil, err
+	// Take a ticket from the pool.
+	select {
+	case ticket := <-r.tickets:
+		return ticket, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
 	}
-
-	return &r.ticket, nil
 }
 
 func (r *SingleInterpreterRuntime) Release(ticket *InterpreterTicket) error {
-	if ticket.cookie != r.ticket.cookie {
-		return errors.New("invalid interpreter ticket")
+	// Double-check the token is valid.
+	if ticket.idx < 0 || ticket.idx > len(r.tickets) {
+		return errors.New("invalid ticket: bad index")
 	}
 
-	globalMtx.Unlock()
+	// Return the ticket to the pool. This should not block as the channel is
+	// buffered.
+	r.tickets <- ticket
+
 	return nil
 }
 
-func (r *SingleInterpreterRuntime) Apply(ticket *InterpreterTicket, _ context.Context, f func() error) error {
-	if ticket.cookie != r.ticket.cookie {
-		return errors.New("invalid interpreter ticket")
+func (r *SingleInterpreterRuntime) Apply(ticket *InterpreterTicket, ctx context.Context, f func() error) error {
+	// Double-check the token is valid.
+	if ticket.idx < 0 || ticket.idx > len(r.tickets) {
+		return errors.New("invalid ticket: bad index")
 	}
 
-	// Pin our go routine & enter the context of the interpreter thread state.
-	runtime.LockOSThread()
-	py.PyEval_RestoreThread(r.thread)
-
-	err := f()
-
-	// Release our thread state and unpin thread.
-	py.PyEval_SaveThread()
-	runtime.UnlockOSThread()
-
-	return err
+	return Evaluate(f, r.replyChans[ticket.idx], ctx)
 }
 
 func (r *SingleInterpreterRuntime) Map(ctx context.Context, f func(ticket *InterpreterTicket) error) error {
@@ -129,16 +137,7 @@ func (r *SingleInterpreterRuntime) Map(ctx context.Context, f func(ticket *Inter
 		return nil
 	}
 
-	// Pin our go routine & enter the context of the interpreter thread state.
-	runtime.LockOSThread()
-	py.PyEval_RestoreThread(r.thread)
-
-	err = f(ticket)
-
-	// Release our thread state and unpin thread.
-	py.PyEval_SaveThread()
-	runtime.UnlockOSThread()
-
+	err = r.Apply(ticket, ctx, func() error { return f(ticket) })
 	_ = r.Release(ticket)
 	return err
 }

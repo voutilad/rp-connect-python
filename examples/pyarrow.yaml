@@ -2,8 +2,6 @@ input:
   python:
     name: batches
     serializer: none
-    modules:
-      - pyarrow
     script: |
       import pyarrow as pa
       from pyarrow import fs

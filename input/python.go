@@ -34,7 +34,6 @@ type pythonInput struct {
 
 	args          py.PyObjectPtr
 	kwargs        py.PyObjectPtr
-	modules       []string
 	script        string
 	generatorName string
 	idx           int64
@@ -55,8 +54,6 @@ var configSpec = service.NewConfigSpec().
 	Field(service.NewIntField("batch_size").
 		Description("Size of batches to generate.").
 		Default(1)).
-	Field(service.NewStringListField("modules").
-		Description("A list of Python function modules to pre-import.")).
 	Field(service.NewStringField("mode").
 		Description("Toggle different Python runtime modes.").
 		Examples(string(python.Global), string(python.Isolated), string(python.IsolatedLegacy)).
@@ -96,11 +93,8 @@ func init() {
 			if err != nil {
 				return nil, err
 			}
-			modules, err := conf.FieldStringList("modules")
-			if err != nil {
-				modules = []string{}
-			}
-			return newPythonInput(exe, script, name, modules, batchSize, python.StringAsMode(mode), python.StringAsSerializerMode(serializerMode), mgr.Logger())
+
+			return newPythonInput(exe, script, name, batchSize, python.StringAsMode(mode), python.StringAsSerializerMode(serializerMode), mgr.Logger())
 		})
 
 	if err != nil {
@@ -108,7 +102,7 @@ func init() {
 	}
 }
 
-func newPythonInput(exe, script, name string, modules []string, batchSize int, mode python.Mode, serializer python.SerializerMode, logger *service.Logger) (service.BatchInput, error) {
+func newPythonInput(exe, script, name string, batchSize int, mode python.Mode, serializer python.SerializerMode, logger *service.Logger) (service.BatchInput, error) {
 	var err error
 	var r python.Runtime
 
@@ -123,7 +117,7 @@ func newPythonInput(exe, script, name string, modules []string, batchSize int, m
 	case python.IsolatedLegacy:
 		r, err = python.NewMultiInterpreterRuntime(exe, 1, true, logger)
 	case python.Global:
-		r, err = python.NewSingleInterpreterRuntime(exe, logger)
+		r, err = python.NewSingleInterpreterRuntime(exe, 1, logger)
 	case python.Isolated:
 		r, err = python.NewMultiInterpreterRuntime(exe, 1, false, logger)
 	default:
@@ -142,7 +136,6 @@ func newPythonInput(exe, script, name string, modules []string, batchSize int, m
 		batchSize:      batchSize,
 		boundsHint:     -1,
 		serializerMode: serializer,
-		modules:        modules,
 	}, nil
 }
 
@@ -150,13 +143,6 @@ func (p *pythonInput) Connect(ctx context.Context) error {
 	err := p.runtime.Start(ctx)
 	if err != nil {
 		return err
-	}
-
-	if len(p.modules) > 0 {
-		err = python.LoadModules(p.modules, ctx)
-		if err != nil {
-			return err
-		}
 	}
 
 	err = p.runtime.Map(ctx, func(_ *python.InterpreterTicket) error {
