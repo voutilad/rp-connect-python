@@ -117,7 +117,7 @@ func newPythonInput(exe, script, name string, batchSize int, mode python.Mode, s
 	case python.IsolatedLegacy:
 		r, err = python.NewMultiInterpreterRuntime(exe, 1, true, logger)
 	case python.Global:
-		r, err = python.NewSingleInterpreterRuntime(exe, logger)
+		r, err = python.NewSingleInterpreterRuntime(exe, 1, logger)
 	case python.Isolated:
 		r, err = python.NewMultiInterpreterRuntime(exe, 1, false, logger)
 	default:

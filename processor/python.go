@@ -151,7 +151,7 @@ func NewPythonProcessor(exe, script string, cnt int, mode python.Mode, serialize
 	case python.IsolatedLegacy:
 		processor, err = newLegacyRuntimeProcessor(exe, cnt, logger)
 	case python.Global:
-		processor, err = newSingleRuntimeProcessor(exe, logger)
+		processor, err = newSingleRuntimeProcessor(exe, cnt, logger)
 	default:
 		return nil, errors.New("invalid mode")
 	}
@@ -319,8 +319,8 @@ func newLegacyRuntimeProcessor(exe string, cnt int, logger *service.Logger) (*Py
 	return &p, nil
 }
 
-func newSingleRuntimeProcessor(exe string, logger *service.Logger) (*PythonProcessor, error) {
-	r, err := python.NewSingleInterpreterRuntime(exe, logger)
+func newSingleRuntimeProcessor(exe string, cnt int, logger *service.Logger) (*PythonProcessor, error) {
+	r, err := python.NewSingleInterpreterRuntime(exe, cnt, logger)
 	if err != nil {
 		return nil, err
 	}

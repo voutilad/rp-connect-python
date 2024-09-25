@@ -52,27 +52,31 @@ func (r *MultiInterpreterRuntime) Start(ctx context.Context) error {
 	}
 	defer globalMtx.Unlock()
 
-	if !r.started {
-		loadPython(r.exe, r.home, r.paths, ctx)
-		r.logger.Debug("Python interpreter started.")
+	if r.started {
+		// Already running.
+		return nil
+	}
 
-		// Start up sub-interpreters.
-		for idx := range len(r.interpreters) {
-			sub, err := Spawn(r.legacyMode, ctx)
-			if err != nil {
-				r.logger.Error("Failed to create new sub-interpreter.")
-				return err
-			}
+	loadPython(r.exe, r.home, r.paths, ctx)
+	r.logger.Debug("Python interpreter started.")
 
-			// Populate our ticket booth and interpreter list.
-			r.interpreters[idx] = sub
-			r.tickets <- &InterpreterTicket{idx: idx, id: sub.Id}
-			r.logger.Tracef("Initialized sub-interpreter %d.\n", sub.Id)
+	// Start up sub-interpreters.
+	for idx := range len(r.interpreters) {
+		sub, err := Spawn(r.legacyMode, ctx)
+		if err != nil {
+			r.logger.Error("Failed to create new sub-interpreter.")
+			return err
 		}
 
-		r.started = true
-		r.logger.Debugf("Started %d sub-interpreters.", len(r.tickets))
+		// Populate our ticket booth and interpreter list.
+		r.interpreters[idx] = sub
+		r.tickets <- &InterpreterTicket{idx: idx, id: sub.Id}
+		r.logger.Tracef("Initialized sub-interpreter %d.\n", sub.Id)
 	}
+
+	r.started = true
+	r.logger.Debugf("Started %d sub-interpreters.", len(r.tickets))
+
 	return nil
 }
 
@@ -87,9 +91,6 @@ func (r *MultiInterpreterRuntime) Stop(ctx context.Context) error {
 	if !r.started {
 		return errors.New("not started")
 	}
-
-	runtime.LockOSThread()
-	defer runtime.UnlockOSThread()
 
 	// Collect all the tickets before stopping the sub-interpreters.
 	tickets := make([]*InterpreterTicket, len(r.tickets))
@@ -112,6 +113,8 @@ func (r *MultiInterpreterRuntime) Stop(ctx context.Context) error {
 	}
 
 	// Tear down the runtime.
+	// runtime.LockOSThread()
+	// defer runtime.UnlockOSThread()
 	err = unloadPython(ctx)
 	if err != nil {
 		return err
@@ -134,7 +137,7 @@ func (r *MultiInterpreterRuntime) Acquire(ctx context.Context) (*InterpreterTick
 
 func (r *MultiInterpreterRuntime) Release(ticket *InterpreterTicket) error {
 	// Double-check the token is valid.
-	if ticket.idx < 0 || ticket.idx > len(r.interpreters) {
+	if ticket.idx < 0 || ticket.idx > len(r.tickets) {
 		return errors.New("invalid ticket: bad index")
 	}
 

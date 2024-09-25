@@ -3,8 +3,6 @@ package python
 import (
 	"context"
 	"errors"
-	"unsafe"
-
 	"github.com/redpanda-data/benthos/v4/public/service"
 	py "github.com/voutilad/gogopython"
 )
@@ -12,28 +10,30 @@ import (
 // SingleInterpreterRuntime provides an implementation for using main
 // Python interpreter.
 type SingleInterpreterRuntime struct {
-	exe     string
-	home    string
-	paths   []string
-	ticket  InterpreterTicket // SingleInterpreterRuntime uses a single ticket.
-	started bool              // protected by globalMtx in runtime.go
+	exe   string
+	home  string
+	paths []string
+
+	replyChans []chan error
+	tickets    chan *InterpreterTicket // SingleInterpreterRuntime uses a single ticket.
+
+	started bool // protected by globalMtx in runtime.go
 	logger  *service.Logger
 }
 
-func NewSingleInterpreterRuntime(exe string, logger *service.Logger) (*SingleInterpreterRuntime, error) {
+func NewSingleInterpreterRuntime(exe string, cnt int, logger *service.Logger) (*SingleInterpreterRuntime, error) {
 	home, paths, err := py.FindPythonHomeAndPaths(exe)
 	if err != nil {
 		return nil, err
 	}
 
 	return &SingleInterpreterRuntime{
-		exe:    exe,
-		home:   home,
-		paths:  paths,
-		logger: logger,
-		ticket: InterpreterTicket{
-			id: -1,
-		},
+		exe:        exe,
+		home:       home,
+		paths:      paths,
+		logger:     logger,
+		tickets:    make(chan *InterpreterTicket, cnt),
+		replyChans: make([]chan error, cnt),
 	}, nil
 }
 
@@ -50,7 +50,13 @@ func (r *SingleInterpreterRuntime) Start(ctx context.Context) error {
 	}
 
 	loadPython(r.exe, r.home, r.paths, ctx)
-	r.ticket.cookie = uintptr(unsafe.Pointer(r))
+	r.logger.Debug("Python interpreter started.")
+
+	for idx := range len(r.replyChans) {
+		r.replyChans[idx] = make(chan error)
+		r.tickets <- &InterpreterTicket{idx: idx, id: -1}
+	}
+
 	r.started = true
 	r.logger.Debug("Python single runtime interpreter started.")
 
@@ -64,8 +70,24 @@ func (r *SingleInterpreterRuntime) Stop(ctx context.Context) error {
 	}
 	defer globalMtx.Unlock()
 
+	if !r.started {
+		return errors.New("not started")
+	}
+
+	// Collect all the tickets so nobody else can get them.
+	tickets := make([]*InterpreterTicket, len(r.tickets))
+	for idx := range tickets {
+		ticket, err := r.Acquire(ctx)
+		if err != nil {
+			panic("cannot acquire ticket while stopping")
+		}
+		tickets[idx] = ticket
+	}
+
 	err = unloadPython(ctx)
-	r.ticket.cookie = 0 // NULL
+	if err != nil {
+		return err
+	}
 	r.started = false
 
 	if err == nil {
@@ -78,23 +100,35 @@ func (r *SingleInterpreterRuntime) Stop(ctx context.Context) error {
 }
 
 func (r *SingleInterpreterRuntime) Acquire(ctx context.Context) (*InterpreterTicket, error) {
-	return &r.ticket, nil
+	// Take a ticket from the pool.
+	select {
+	case ticket := <-r.tickets:
+		return ticket, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
 }
 
 func (r *SingleInterpreterRuntime) Release(ticket *InterpreterTicket) error {
-	if ticket.cookie != r.ticket.cookie {
-		return errors.New("invalid interpreter ticket")
+	// Double-check the token is valid.
+	if ticket.idx < 0 || ticket.idx > len(r.tickets) {
+		return errors.New("invalid ticket: bad index")
 	}
+
+	// Return the ticket to the pool. This should not block as the channel is
+	// buffered.
+	r.tickets <- ticket
 
 	return nil
 }
 
 func (r *SingleInterpreterRuntime) Apply(ticket *InterpreterTicket, ctx context.Context, f func() error) error {
-	if ticket.cookie != r.ticket.cookie {
-		return errors.New("invalid interpreter ticket")
+	// Double-check the token is valid.
+	if ticket.idx < 0 || ticket.idx > len(r.tickets) {
+		return errors.New("invalid ticket: bad index")
 	}
 
-	return Evaluate(f, ctx)
+	return Evaluate(f, r.replyChans[ticket.idx], ctx)
 }
 
 func (r *SingleInterpreterRuntime) Map(ctx context.Context, f func(ticket *InterpreterTicket) error) error {
@@ -103,7 +137,7 @@ func (r *SingleInterpreterRuntime) Map(ctx context.Context, f func(ticket *Inter
 		return nil
 	}
 
-	err = Evaluate(func() error { return f(ticket) }, ctx)
+	err = r.Apply(ticket, ctx, func() error { return f(ticket) })
 	_ = r.Release(ticket)
 	return err
 }

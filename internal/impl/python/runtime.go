@@ -178,7 +178,7 @@ func loadPython(exe, home string, paths []string, ctx context.Context) {
 
 // unloadPython tears down the global interpreter state.
 //
-// Must be called with the go routine thread pinned and global mutex locked.
+// Must be called with the global mutex locked.
 func unloadPython(_ context.Context) error {
 	globalMtx.AssertLocked()
 
@@ -322,6 +322,7 @@ func launchOnce() {
 	}()
 }
 
+// DropGlobalReferences to a list of PyObjectPtr.
 func DropGlobalReferences(objs []py.PyObjectPtr, ctx context.Context) error {
 	select {
 	case <-ctx.Done():
@@ -331,11 +332,15 @@ func DropGlobalReferences(objs []py.PyObjectPtr, ctx context.Context) error {
 	}
 }
 
-func Evaluate(fn func() error, ctx context.Context) error {
-	// XXX This is all a hack currently and needs optimization.
-
+// Evaluate a given function fn in the context of the main interpreter.
+// A response is provided via the channel c.
+//
+// XXX This may look a little odd, both returning an error and using a
+// channel, but it's to avoid having to allocate a channel for each call
+// as this function will be called frequently.
+func Evaluate(fn func() error, c chan error, ctx context.Context) error {
 	request := fnRequest{
-		reply: make(chan error),
+		reply: c,
 		fn:    fn,
 	}
 
@@ -345,7 +350,7 @@ func Evaluate(fn func() error, ctx context.Context) error {
 	case chanExecFuncs <- &request:
 		// Wait for a reply.
 		select {
-		case err := <-request.reply:
+		case err := <-c:
 			return err
 		case <-ctx.Done():
 			panic(ctx.Err())
@@ -353,6 +358,7 @@ func Evaluate(fn func() error, ctx context.Context) error {
 	}
 }
 
+// Spawn a new sub-interpreter.
 func Spawn(legacyMode bool, ctx context.Context) (*SubInterpreter, error) {
 	request := subRequest{
 		reply:      make(chan *subReply),
@@ -372,6 +378,7 @@ func Spawn(legacyMode bool, ctx context.Context) (*SubInterpreter, error) {
 	}
 }
 
+// StopSub will attempt to shut down a sub-interpreter.
 func StopSub(subInterpreter *SubInterpreter, ctx context.Context) error {
 	request := subStopRequest{
 		subInterpreter: subInterpreter,
@@ -394,6 +401,7 @@ func StopSub(subInterpreter *SubInterpreter, ctx context.Context) error {
 // Initialize a Sub-interpreter.
 //
 // Caller must have the main interpreter state loaded and Go routine pinned.
+// This must be called from the context of the "main" interpreter.
 func initSubInterpreter(legacyMode bool) (*SubInterpreter, error) {
 	// Some of these args are required if we want to use Numpy, etc.
 	var ts py.PyThreadStatePtr
