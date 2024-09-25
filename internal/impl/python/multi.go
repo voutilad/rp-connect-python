@@ -15,7 +15,7 @@ type MultiInterpreterRuntime struct {
 	home  string   // Python home.
 	paths []string // Python package paths.
 
-	interpreters []*SubInterpreter       // Sub-interpreters.
+	interpreters []*subInterpreter       // Sub-interpreters.
 	tickets      chan *InterpreterTicket // Tickets for sub-interpreters.
 
 	mtx        *ContextAwareMutex // Mutex to write protect the runtime state.
@@ -35,7 +35,7 @@ func NewMultiInterpreterRuntime(exe string, cnt int, legacyMode bool, logger *se
 		home:         home,
 		paths:        paths,
 		mtx:          NewContextAwareMutex(),
-		interpreters: make([]*SubInterpreter, cnt),
+		interpreters: make([]*subInterpreter, cnt),
 		tickets:      make(chan *InterpreterTicket, cnt),
 		legacyMode:   legacyMode,
 		logger:       logger,
@@ -70,8 +70,8 @@ func (r *MultiInterpreterRuntime) Start(ctx context.Context) error {
 
 		// Populate our ticket booth and interpreter list.
 		r.interpreters[idx] = sub
-		r.tickets <- &InterpreterTicket{idx: idx, id: sub.Id}
-		r.logger.Tracef("Initialized sub-interpreter %d.\n", sub.Id)
+		r.tickets <- &InterpreterTicket{idx: idx, id: sub.id}
+		r.logger.Tracef("Initialized sub-interpreter %d.\n", sub.id)
 	}
 
 	r.started = true
@@ -109,7 +109,7 @@ func (r *MultiInterpreterRuntime) Stop(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		r.logger.Tracef("Stopped sub-interpreter %d.\n", sub.Id)
+		r.logger.Tracef("Stopped sub-interpreter %d.\n", sub.id)
 	}
 
 	// Tear down the runtime.
@@ -155,13 +155,13 @@ func (r *MultiInterpreterRuntime) Apply(ticket *InterpreterTicket, _ context.Con
 	}
 
 	interpreter := r.interpreters[ticket.idx]
-	if interpreter.Id != ticket.id {
+	if interpreter.id != ticket.id {
 		return errors.New("invalid ticket: bad interpreter id")
 	}
 
 	// Pin our go routine & enter the context of the interpreter thread state.
 	runtime.LockOSThread()
-	py.PyEval_RestoreThread(interpreter.Thread)
+	py.PyEval_RestoreThread(interpreter.thread)
 
 	err := f()
 
@@ -199,7 +199,7 @@ func (r *MultiInterpreterRuntime) Map(ctx context.Context, f func(t *Interpreter
 	defer runtime.UnlockOSThread()
 	for _, ticket := range tickets {
 		sub := r.interpreters[ticket.idx]
-		py.PyEval_RestoreThread(sub.Thread)
+		py.PyEval_RestoreThread(sub.thread)
 		err := f(ticket)
 		py.PyEval_SaveThread()
 		if err != nil {

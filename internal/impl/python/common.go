@@ -1,7 +1,6 @@
 package python
 
 import (
-	py "github.com/voutilad/gogopython"
 	"strings"
 )
 
@@ -56,10 +55,3 @@ func StringAsSerializerMode(s string) SerializerMode {
 }
 
 const SerializerMetaKey = "_python_serializer"
-
-// SubInterpreter state to allow multi-interpreter runtimes.
-type SubInterpreter struct {
-	State  py.PyInterpreterStatePtr // Interpreter State.
-	Thread py.PyThreadStatePtr      // Original Python ThreadState.
-	Id     int64                    // Unique identifier.
-}

@@ -32,6 +32,13 @@ var pythonExe = ""
 // Protected by globalMtx.
 var pythonMain py.PyThreadStatePtr
 
+// subInterpreter state to allow multi-interpreter runtimes.
+type subInterpreter struct {
+	state  py.PyInterpreterStatePtr // Interpreter State.
+	thread py.PyThreadStatePtr      // Original Python ThreadState.
+	id     int64                    // Unique identifier.
+}
+
 type config struct {
 	home  string
 	paths []string
@@ -49,12 +56,12 @@ type subRequest struct {
 
 type subReply struct {
 	err            error
-	subInterpreter *SubInterpreter
+	subInterpreter *subInterpreter
 }
 
 type subStopRequest struct {
 	reply          chan error
-	subInterpreter *SubInterpreter
+	subInterpreter *subInterpreter
 }
 
 var consumersCnt = 0                      // Number of current consumers. Protected by globalMtx.
@@ -303,12 +310,12 @@ func launchOnce() {
 				case req := <-chanStopSub:
 					// Restore the sub-interpreter thread state.
 					sub := req.subInterpreter
-					py.PyEval_RestoreThread(sub.Thread)
-					py.PyThreadState_Clear(sub.Thread)
+					py.PyEval_RestoreThread(sub.thread)
+					py.PyThreadState_Clear(sub.thread)
 
 					// Clean up the ThreadState. Clear *must* be called before Delete.
-					py.PyInterpreterState_Clear(sub.State)
-					py.PyInterpreterState_Delete(sub.State)
+					py.PyInterpreterState_Clear(sub.state)
+					py.PyInterpreterState_Delete(sub.state)
 					req.reply <- nil
 				}
 			}
@@ -359,7 +366,7 @@ func Evaluate(fn func() error, c chan error, ctx context.Context) error {
 }
 
 // Spawn a new sub-interpreter.
-func Spawn(legacyMode bool, ctx context.Context) (*SubInterpreter, error) {
+func Spawn(legacyMode bool, ctx context.Context) (*subInterpreter, error) {
 	request := subRequest{
 		reply:      make(chan *subReply),
 		legacyMode: legacyMode,
@@ -379,7 +386,7 @@ func Spawn(legacyMode bool, ctx context.Context) (*SubInterpreter, error) {
 }
 
 // StopSub will attempt to shut down a sub-interpreter.
-func StopSub(subInterpreter *SubInterpreter, ctx context.Context) error {
+func StopSub(subInterpreter *subInterpreter, ctx context.Context) error {
 	request := subStopRequest{
 		subInterpreter: subInterpreter,
 		reply:          make(chan error),
@@ -402,7 +409,7 @@ func StopSub(subInterpreter *SubInterpreter, ctx context.Context) error {
 //
 // Caller must have the main interpreter state loaded and Go routine pinned.
 // This must be called from the context of the "main" interpreter.
-func initSubInterpreter(legacyMode bool) (*SubInterpreter, error) {
+func initSubInterpreter(legacyMode bool) (*subInterpreter, error) {
 	// Some of these args are required if we want to use Numpy, etc.
 	var ts py.PyThreadStatePtr
 	interpreterConfig := py.PyInterpreterConfig{}
@@ -433,9 +440,9 @@ func initSubInterpreter(legacyMode bool) (*SubInterpreter, error) {
 	id := py.PyInterpreterState_GetID(state)
 	ts = py.PyEval_SaveThread()
 
-	return &SubInterpreter{
-		State:  state,
-		Thread: ts,
-		Id:     id,
+	return &subInterpreter{
+		state:  state,
+		thread: ts,
+		id:     id,
 	}, nil
 }
