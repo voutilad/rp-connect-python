@@ -7,7 +7,7 @@ import (
 
 // Test that we can start and stop the runtime multiple times.
 func TestSingleInterpreterRuntimeLifecycle(t *testing.T) {
-	r, err := NewSingleInterpreterRuntime("python3", nil)
+	r, err := NewSingleInterpreterRuntime("python3", 1, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
